@@ -535,7 +535,13 @@ Move the personal backtesting tool from `/` to `/pvt` so the root URL can serve 
 
 ### Vision
 
-A public-facing SaaS product at `https://chadbacktesting.com` that lets traders sign up, pay, and use the backtesting tool. Branding is **GigaChad** meme-inspired - serious product, hilarious personality.
+A **fully free backtesting platform** at `https://chadbacktesting.com` with premium AI-powered and educational features behind paid tiers. Branding is **GigaChad** meme-inspired - serious product, hilarious personality.
+
+### Niche / Market Position
+
+The core niche: **a completely free, no-strings-attached backtesting platform.** Most backtesting tools either cost money, limit features on free tiers, or gate data access. Chad Backtesting gives every user the full backtesting tool for free - load any available data, trade, journal, screenshot, tag, review - no limits.
+
+The paid tiers (GigaChad, MegaChad) exist for advanced AI features and a **Learning Area** with interactive trading courses. The free tool is the funnel. The education and AI coaching are the upsell.
 
 ### Architecture (Confirmed Decisions)
 
@@ -546,6 +552,7 @@ A public-facing SaaS product at `https://chadbacktesting.com` that lets traders 
 | **SSL** | Let's Encrypt via certbot + nginx | Free, automatic renewal |
 | **Auth** | Google Sign-In (OAuth 2.0) | Single sign-on, no password management needed |
 | **Payments** | Stripe (keys/config to be provided by Mason later) | Industry standard, confirmed |
+| **AI Provider** | Anthropic Claude Haiku (for scenario coaching in Learning Area) | Cost-efficient at scale for many users/scenarios |
 | **www redirect** | 301 `www.chadbacktesting.com` → `chadbacktesting.com` | Canonical non-www |
 
 ### Architecture Decision Points (Still Open)
@@ -577,11 +584,11 @@ The backtesting chart (`arkon.html`) stays in `arkon/` and is served directly by
 
 | Tier | Price | What They Get |
 |------|-------|---------------|
-| **Free** | $0/mo | Full backtesting tool access. Load any available data, backtest freely, save trades, strategies, trade journaling, screenshots, tags - everything the tool does today. No restrictions on features. |
-| **GigaChad** | $250/mo | Everything in Free + AI Indicator Generator |
-| **MegaChad** | TBD | Everything in GigaChad + AI Chad Coach with voice-narrated analysis |
+| **Free** | $0/mo | Full backtesting tool access. Load any available data, backtest freely, save trades, strategies, trade journaling, screenshots, tags - everything the tool does today. No restrictions on core features. |
+| **GigaChad** | $250/mo | Everything in Free + AI Indicator Generator + Learning Area (interactive courses with AI scenario coaching) |
+| **MegaChad** | TBD | Everything in GigaChad + AI Chad Coach with voice-narrated retroactive analysis |
 
-**Important: The Free tier is generous by design.** Every user gets the full backtesting experience for free. Paid tiers are for advanced AI-powered features only.
+**Important: The Free tier is generous by design.** Every user gets the full backtesting experience for free with zero restrictions on the core tool. Paid tiers are for advanced AI-powered features and the educational Learning Area.
 
 ### Proposed SaaS Components
 
@@ -618,10 +625,20 @@ The backtesting chart (`arkon.html`) stays in `arkon/` and is served directly by
 - Manage subscription via Stripe Customer Portal
 - Billing history
 
+#### Learning Area (`/learn`) - GigaChad & MegaChad tiers
+- Interactive trading courses accessible to paid subscribers
+- **Any user can create their own course** and publish it for other paid users
+- Courses can include text, images, videos, and most importantly: **interactive chart scenarios**
+- **Scenario system**: A course author sets up a scenario by picking a specific symbol, a specific point in time, and chart configuration. The student is dropped into that exact moment in the backtesting chart and must make trading decisions.
+- **AI Coaching per scenario**: After the student plays through a scenario (makes trades or observes), an AI output powered by **Claude Haiku** analyzes what they did, what the chart showed, and gives feedback/coaching. The AI sees the chart data context (timestamps, price action, indicators visible, trades placed) and provides targeted feedback.
+- Course structure: modules → lessons → scenarios + content
+- Leaderboards or completion tracking per course (optional)
+
 #### Admin Panel (`/admin` - internal only)
 - User management
 - Subscription stats
 - Usage metrics
+- Course moderation
 
 ### Stripe Integration Details
 
@@ -648,19 +665,47 @@ The backtesting chart (`arkon.html`) stays in `arkon/` and is served directly by
 
 **Status: DO NOT BUILD. Documentation only.**
 
-An AI-powered tool that generates custom trading indicators. Details TBD by Mason. This is the core value proposition of the GigaChad paid tier. Until Mason provides specifications and says to build it, this feature does not exist in the codebase.
+An AI-powered tool that generates custom trading indicators. Details TBD by Mason. This is one of the core value propositions of the GigaChad paid tier. Until Mason provides specifications and says to build it, this feature does not exist in the codebase.
 
-#### FUTURE: AI Chad Coach (MegaChad Tier - Price TBD)
+#### FUTURE: Learning Area with Interactive Courses (GigaChad & MegaChad Tiers)
+
+**Status: DO NOT BUILD. Documentation only.**
+
+A full interactive education system where:
+
+1. **Course Creation**: Any user (on a paid tier) can create and publish their own trading course for other paid users to take. Courses consist of modules → lessons → a mix of content and interactive chart scenarios.
+
+2. **Interactive Chart Scenarios**: The heart of the Learning Area. A course author picks:
+   - A specific trading symbol (e.g., NQ)
+   - A specific point in time (a date and timestamp in the cached market data)
+   - A chart configuration (timeframes, indicators, etc.)
+   
+   The student is dropped into that exact moment on the backtesting chart and must make trading decisions (or just observe). This leverages the existing Arkon chart and its data - the scenario just pre-loads a specific state.
+
+3. **AI Scenario Coaching (Claude Haiku)**: After the student plays through a scenario:
+   - The system captures what the chart showed (data timestamps, price action, indicator values, volume, depth, etc.)
+   - The system captures what the student did (trades placed, entries, exits, P&L, timing)
+   - This context is sent to **Claude Haiku** (Anthropic API) which analyzes the student's decisions against the chart data and provides targeted coaching feedback
+   - Feedback is presented inline after the scenario completes
+   - Claude Haiku is chosen for cost-efficiency at scale (many users, many scenarios)
+
+4. **Course Discovery**: Browse/search published courses, filter by author, difficulty, instrument, etc.
+
+5. **Completion Tracking**: Track which courses/scenarios a student has completed, their scores/performance.
+
+This feature requires Mason to flesh out the full UX, the course authoring interface, scenario setup flow, and the specific Claude Haiku prompt engineering before any implementation begins.
+
+#### FUTURE: AI Chad Coach - Voice Analysis (MegaChad Tier - Price TBD)
 
 **Status: DO NOT BUILD. Documentation only. Mason will flesh out this feature personally.**
 
-A premium AI coaching feature that:
+The most premium and differentiated feature. A coaching system that:
 1. **Voice Recording During Backtesting**: While the user backtests, they narrate into their microphone everything they're factoring into their decisions (e.g., "I see a CVD divergence here, the bid depth is thinning, volume is picking up at this level...")
 2. **Chart Data Correlation**: The voice narration is tied to the exact chart state - loaded data timestamps, visible indicators, price levels, volume data - everything shown on screen at the moment the user speaks
 3. **Retroactive Factor Analysis**: After backtesting sessions, AI analyzes every factor the user mentioned in their narration and correlates it with their actual trade performance (entries, exits, P&L)
 4. **Dynamic Graphs & Statistics**: Generates flexible visualizations and statistics showing which factors in the user's system actually correlate with winning vs losing trades, which factors they mention but don't act on, which setups they describe that lead to the best risk-adjusted returns, etc.
 
-This is the most advanced and differentiated feature of the product. It requires significant design work from Mason before any implementation begins.
+This is the most advanced feature. It requires significant design work from Mason before any implementation begins.
 
 ### Branding Notes
 
@@ -757,11 +802,26 @@ This is the most advanced and differentiated feature of the product. It requires
 ### Phase 8: Future Premium Features (DO NOT START - MASON WILL INITIATE)
 
 > **These phases are placeholders only. Do not begin work on any of them.**
+> **Mason will personally flesh out specs and explicitly request implementation.**
 
-- [ ] **T8.1** - AI Indicator Generator (GigaChad tier feature) - Mason will provide specs
-- [ ] **T8.2** - AI Chad Coach voice recording system (MegaChad tier feature) - Mason will provide specs
-- [ ] **T8.3** - Chart data + voice correlation engine - Mason will provide specs
-- [ ] **T8.4** - Retroactive factor analysis and dynamic graph generation - Mason will provide specs
+#### 8A: Learning Area & Interactive Courses (GigaChad + MegaChad tiers)
+- [ ] **T8A.1** - Course data model (courses, modules, lessons, scenarios) and database schema
+- [ ] **T8A.2** - Course authoring interface (create/edit courses, add scenarios)
+- [ ] **T8A.3** - Scenario setup: pick symbol, timestamp, chart config → save as scenario
+- [ ] **T8A.4** - Scenario playback: student loads scenario → dropped into chart at that moment
+- [ ] **T8A.5** - Claude Haiku integration: capture chart data + student actions → send to Haiku → display coaching feedback
+- [ ] **T8A.6** - Course discovery, browsing, search, filtering
+- [ ] **T8A.7** - Course completion tracking and student progress
+- [ ] **T8A.8** - User-generated course publishing flow and moderation
+
+#### 8B: AI Indicator Generator (GigaChad tier)
+- [ ] **T8B.1** - Mason will provide specs - DO NOT BUILD
+
+#### 8C: AI Chad Coach - Voice Analysis (MegaChad tier)
+- [ ] **T8C.1** - Voice recording during backtesting sessions - Mason will provide specs
+- [ ] **T8C.2** - Chart data + voice narration timestamp correlation - Mason will provide specs
+- [ ] **T8C.3** - Retroactive factor analysis engine - Mason will provide specs
+- [ ] **T8C.4** - Dynamic graph/statistics generation from factor analysis - Mason will provide specs
 
 ---
 
