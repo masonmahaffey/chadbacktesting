@@ -544,7 +544,8 @@ A public-facing SaaS product at `https://chadbacktesting.com` that lets traders 
 | **Hosting** | Everything on Hetzner server, nginx reverse proxy | Single server simplicity, domain already pointed here |
 | **Domain** | `chadbacktesting.com` | DNS already configured (A records → 95.216.5.147) |
 | **SSL** | Let's Encrypt via certbot + nginx | Free, automatic renewal |
-| **Payments** | Stripe | Industry standard, confirmed |
+| **Auth** | Google Sign-In (OAuth 2.0) | Single sign-on, no password management needed |
+| **Payments** | Stripe (keys/config to be provided by Mason later) | Industry standard, confirmed |
 | **www redirect** | 301 `www.chadbacktesting.com` → `chadbacktesting.com` | Canonical non-www |
 
 ### Architecture Decision Points (Still Open)
@@ -554,21 +555,16 @@ A public-facing SaaS product at `https://chadbacktesting.com` that lets traders 
    - Option B: Plain HTML/CSS/JS (consistent with arkon.html, simplest to deploy)
    - Option C: Astro (good for marketing + app hybrid, static output)
 
-2. **Auth system**:
-   - Option A: Clerk / Auth0 (managed, fast to implement)
-   - Option B: Custom auth with JWT + existing SQLite
-   - Option C: Supabase Auth
-
-3. **Multi-tenancy**:
+2. **Multi-tenancy**:
    - Currently the `owner` field in the DB separates users
-   - Need to add proper authentication to protect user data
-   - Each user should only see their own strategies/trades
+   - With Google Sign-In, the user's Google account ID or email becomes their `owner` identity
+   - Need auth middleware to protect user data so each user only sees their own strategies/trades
 
 ### Code Separation Rule
 
 **The `chadbacktesting/` repo does NOT contain any Arkon chart code.** It only contains:
 - SaaS marketing / landing pages
-- Auth pages (login, signup, forgot password)
+- Auth integration (Google Sign-In OAuth flow)
 - Dashboard pages
 - Billing / account management pages
 - Deployment scripts for the SaaS layer
@@ -577,35 +573,49 @@ A public-facing SaaS product at `https://chadbacktesting.com` that lets traders 
 
 The backtesting chart (`arkon.html`) stays in `arkon/` and is served directly by the existing FastAPI server. The SaaS layer gates access to it via auth but never duplicates it.
 
+### Pricing Tiers
+
+| Tier | Price | What They Get |
+|------|-------|---------------|
+| **Free** | $0/mo | Full backtesting tool access. Load any available data, backtest freely, save trades, strategies, trade journaling, screenshots, tags - everything the tool does today. No restrictions on features. |
+| **GigaChad** | $250/mo | Everything in Free + AI Indicator Generator |
+| **MegaChad** | TBD | Everything in GigaChad + AI Chad Coach with voice-narrated analysis |
+
+**Important: The Free tier is generous by design.** Every user gets the full backtesting experience for free. Paid tiers are for advanced AI-powered features only.
+
 ### Proposed SaaS Components
 
 #### Landing Page (`/`)
 - GigaChad themed hero section
 - Feature highlights (backtesting tool screenshots)
-- Pricing section with Stripe checkout
-- Sign up / Login CTAs
+- Pricing section showing Free / GigaChad / MegaChad tiers
+- "Sign in with Google" CTA
 - Testimonials section (tongue-in-cheek GigaChad themed)
 
-#### Auth System (`/login`, `/signup`, `/forgot-password`)
-- Sign up / Login pages
-- Email verification
-- Password reset
-- Session management (JWT or session cookies)
+#### Auth System
+- **Google Sign-In only** (OAuth 2.0) - no email/password
+- User clicks "Sign in with Google" → Google OAuth flow → redirect back with token
+- Server creates/finds user account based on Google profile (email, name, avatar)
+- Session management via JWT or secure httpOnly cookies
+- User's Google email or Google ID becomes their `owner` identity in the database
 
 #### Dashboard (`/dashboard`)
 - User's strategies list
 - Performance metrics / stats
 - Quick-launch backtesting button
+- Current subscription tier badge (Free / GigaChad / MegaChad)
 
 #### Backtesting Tool (`/app` or `/backtest`)
-- This IS `arkon.html` - served for authenticated, subscribed users
-- Gated behind auth + active Stripe subscription check
-- User's `owner` field tied to their account ID
+- This IS `arkon.html` - served for authenticated users
+- Gated behind Google Sign-In auth (any tier, including Free)
+- User's `owner` field tied to their Google account
 - Served by the existing FastAPI server at a protected route
 
 #### Account / Settings (`/account`, `/billing`)
-- Profile management
-- Subscription management via Stripe Customer Portal
+- Profile info (from Google account)
+- Current subscription tier
+- Upgrade to GigaChad / MegaChad via Stripe Checkout
+- Manage subscription via Stripe Customer Portal
 - Billing history
 
 #### Admin Panel (`/admin` - internal only)
@@ -615,14 +625,42 @@ The backtesting chart (`arkon.html`) stays in `arkon/` and is served directly by
 
 ### Stripe Integration Details
 
-- **Stripe Checkout**: For initial subscription signup
+- **Stripe Checkout**: For upgrading from Free → GigaChad or MegaChad
 - **Stripe Customer Portal**: For subscription management (cancel, upgrade, payment method)
 - **Stripe Webhooks**: `/api/stripe/webhook` endpoint to handle:
-  - `checkout.session.completed` - activate subscription
+  - `checkout.session.completed` - activate paid subscription
   - `customer.subscription.updated` - plan changes
-  - `customer.subscription.deleted` - cancellation
+  - `customer.subscription.deleted` - revert to Free tier
   - `invoice.payment_failed` - handle failed payments
-- **Pricing tiers**: TBD (e.g., Free trial → Pro monthly → Pro annual)
+- **Stripe API keys**: To be provided by Mason when ready for implementation
+- **Note**: Free users do NOT go through Stripe at all. Only paid tier upgrades touch Stripe.
+
+---
+
+### Future Features (DO NOT BUILD UNTIL MASON SAYS SO)
+
+> **AGENTS: READ THIS CAREFULLY.** The following features are part of the long-term product vision
+> but are explicitly NOT to be built now. Do not implement, scaffold, stub out, or create
+> placeholder code for these features. They are documented here for context only. Mason will
+> personally flesh out the specs and explicitly request implementation when the time comes.
+
+#### FUTURE: AI Indicator Generator (GigaChad Tier - $250/mo)
+
+**Status: DO NOT BUILD. Documentation only.**
+
+An AI-powered tool that generates custom trading indicators. Details TBD by Mason. This is the core value proposition of the GigaChad paid tier. Until Mason provides specifications and says to build it, this feature does not exist in the codebase.
+
+#### FUTURE: AI Chad Coach (MegaChad Tier - Price TBD)
+
+**Status: DO NOT BUILD. Documentation only. Mason will flesh out this feature personally.**
+
+A premium AI coaching feature that:
+1. **Voice Recording During Backtesting**: While the user backtests, they narrate into their microphone everything they're factoring into their decisions (e.g., "I see a CVD divergence here, the bid depth is thinning, volume is picking up at this level...")
+2. **Chart Data Correlation**: The voice narration is tied to the exact chart state - loaded data timestamps, visible indicators, price levels, volume data - everything shown on screen at the moment the user speaks
+3. **Retroactive Factor Analysis**: After backtesting sessions, AI analyzes every factor the user mentioned in their narration and correlates it with their actual trade performance (entries, exits, P&L)
+4. **Dynamic Graphs & Statistics**: Generates flexible visualizations and statistics showing which factors in the user's system actually correlate with winning vs losing trades, which factors they mention but don't act on, which setups they describe that lead to the best risk-adjusted returns, etc.
+
+This is the most advanced and differentiated feature of the product. It requires significant design work from Mason before any implementation begins.
 
 ### Branding Notes
 
@@ -641,7 +679,7 @@ The backtesting chart (`arkon.html`) stays in `arkon/` and is served directly by
 
 - [x] **T0.1** - Create chadbacktesting repo and push to GitHub
 - [x] **T0.2** - Document full system architecture and context for agents (this file)
-- [ ] **T0.3** - Decide on frontend framework and auth provider
+- [ ] **T0.3** - Decide on frontend framework
 - [ ] **T0.4** - Set up project scaffold in `chadbacktesting/` based on architecture decisions
 
 ### Phase 1: Server Infrastructure (nginx, SSL, Domain)
@@ -675,26 +713,29 @@ The backtesting chart (`arkon.html`) stays in `arkon/` and is served directly by
 - [ ] **T3.4** - Add email collection / waitlist functionality
 - [ ] **T3.5** - Verify `/pvt` still works after root changes
 
-### Phase 4: Authentication
+### Phase 4: Google Sign-In Authentication
 
-- [ ] **T4.1** - Choose and set up auth provider (Clerk / Auth0 / custom JWT)
-- [ ] **T4.2** - Build sign up / login / forgot-password pages
-- [ ] **T4.3** - Add auth middleware to protect backtesting API endpoints
-- [ ] **T4.4** - Map authenticated user to `owner` field in database
-- [ ] **T4.5** - Gate access to the backtesting tool (`/app` or `/backtest`) behind auth
-- [ ] **T4.6** - Ensure `/pvt` route bypasses SaaS auth (Mason's private access)
+- [ ] **T4.1** - Set up Google Cloud project and OAuth 2.0 credentials (Client ID, Client Secret)
+- [ ] **T4.2** - Add `users` table to the database (google_id, email, name, avatar_url, subscription_tier, stripe_customer_id, created_at)
+- [ ] **T4.3** - Implement Google OAuth flow on the server (redirect to Google, handle callback, create/find user, issue session)
+- [ ] **T4.4** - Build "Sign in with Google" button on landing page and any auth-required pages
+- [ ] **T4.5** - Implement session management (JWT or httpOnly cookies)
+- [ ] **T4.6** - Add auth middleware to protect `/app` (backtesting tool) and `/api/*` endpoints
+- [ ] **T4.7** - Map authenticated user's Google ID/email to the `owner` field in strategies/trades
+- [ ] **T4.8** - Ensure `/pvt` route bypasses SaaS auth (Mason's private access, no Google login needed)
+- [ ] **T4.9** - All Free tier users get full backtesting access after signing in (no paywall for core features)
 
-### Phase 5: Stripe Payments
+### Phase 5: Stripe Payments (for GigaChad / MegaChad tiers only)
 
-- [ ] **T5.1** - Set up Stripe account, get API keys (test + live)
-- [ ] **T5.2** - Define pricing tiers (free trial duration, Pro monthly, Pro annual)
-- [ ] **T5.3** - Create Stripe Products and Prices in dashboard
-- [ ] **T5.4** - Implement Stripe Checkout flow (signup → payment → access)
-- [ ] **T5.5** - Implement `/api/stripe/webhook` endpoint for subscription events
-- [ ] **T5.6** - Set up Stripe Customer Portal for self-service subscription management
-- [ ] **T5.7** - Add subscription status checks before serving backtesting tool
-- [ ] **T5.8** - Build `/billing` page with plan info, upgrade/downgrade, cancel
-- [ ] **T5.9** - Test full flow: signup → pay → access tool → cancel → lose access
+- [ ] **T5.1** - Mason provides Stripe API keys (test + live) - **BLOCKED until Mason provides**
+- [ ] **T5.2** - Create Stripe Products and Prices: GigaChad ($250/mo), MegaChad (price TBD)
+- [ ] **T5.3** - Implement Stripe Checkout flow (Free user → upgrade to paid tier)
+- [ ] **T5.4** - Implement `/api/stripe/webhook` endpoint for subscription lifecycle events
+- [ ] **T5.5** - Set up Stripe Customer Portal for self-service subscription management
+- [ ] **T5.6** - Store subscription tier on user record, update via webhooks
+- [ ] **T5.7** - Build `/billing` page with current tier, upgrade options, manage subscription
+- [ ] **T5.8** - Test full flow: sign in (Free) → upgrade to GigaChad → manage → cancel → revert to Free
+- [ ] **T5.9** - Note: Paid tier features (AI Indicator Generator, AI Chad Coach) are NOT built yet. Subscription upgrade should work but gated features show "Coming Soon" until Mason says to build them.
 
 ### Phase 6: Multi-tenant Backtesting
 
@@ -712,6 +753,15 @@ The backtesting chart (`arkon.html`) stays in `arkon/` and is served directly by
 - [ ] **T7.4** - Analytics (Mixpanel / PostHog / Google Analytics)
 - [ ] **T7.5** - Legal pages (Terms of Service, Privacy Policy)
 - [ ] **T7.6** - Public launch
+
+### Phase 8: Future Premium Features (DO NOT START - MASON WILL INITIATE)
+
+> **These phases are placeholders only. Do not begin work on any of them.**
+
+- [ ] **T8.1** - AI Indicator Generator (GigaChad tier feature) - Mason will provide specs
+- [ ] **T8.2** - AI Chad Coach voice recording system (MegaChad tier feature) - Mason will provide specs
+- [ ] **T8.3** - Chart data + voice correlation engine - Mason will provide specs
+- [ ] **T8.4** - Retroactive factor analysis and dynamic graph generation - Mason will provide specs
 
 ---
 
@@ -760,8 +810,8 @@ cd c:\Users\mason\Documents\arkon
 | `https://chadbacktesting.com/` | Chad Backtesting SaaS landing page |
 | `https://chadbacktesting.com/pvt` | Mason's private Arkon backtesting (no auth) |
 | `https://chadbacktesting.com/app` | Authenticated user backtesting tool (arkon.html gated by auth+subscription) |
-| `https://chadbacktesting.com/login` | Login page |
-| `https://chadbacktesting.com/signup` | Signup page |
+| `https://chadbacktesting.com/auth/google` | Google OAuth redirect |
+| `https://chadbacktesting.com/auth/callback` | Google OAuth callback |
 | `https://chadbacktesting.com/dashboard` | User dashboard |
 | `https://chadbacktesting.com/billing` | Subscription management |
 | `https://chadbacktesting.com/docs` | FastAPI auto-generated API docs |
@@ -796,7 +846,7 @@ cd c:\Users\mason\Documents\arkon
 
 **Contains:**
 - Landing page HTML/CSS/JS (or framework-based pages)
-- Auth page templates (login, signup, forgot-password)
+- Auth integration code (Google Sign-In OAuth flow)
 - Dashboard page templates
 - Billing/account page templates
 - GigaChad brand assets (images, logo, fonts)
