@@ -1,5 +1,9 @@
 # Chad Backtesting - Master Plan & System Context
 
+**Companion documents:**
+- **AGENTS.md** — Agent execution system, roles, flows, recursive build loop, user persona, prompt templates
+- **PLAN.md** (this file) — Product plan, architecture, database, API, security, task breakdown
+
 ## Table of Contents
 1. [Project Vision](#project-vision)
 2. [Current System Architecture (Arkon)](#current-system-architecture-arkon)
@@ -998,6 +1002,31 @@ This is the most advanced feature. It requires significant design work from Maso
 - **Visual style**: Clean modern SaaS design with GigaChad meme imagery as accents
 - **Color palette**: Dark mode primary (consistent with the dark charts), with bold accent colors
 - **Tone**: Serious about the product, hilarious in copy. "Your P&L is crying. Fix it."
+
+### Target User & UX Requirements
+
+> Full user persona ("Jake") is documented in **AGENTS.md**.
+
+Key UX requirements derived from persona analysis:
+
+- **Zero-friction onboarding**: Google Sign-In → chart in under 30 seconds. No tutorial walls, no mandatory forms.
+- **First-run guidance**: Subtle, skippable overlay showing "load data → take a trade → review" flow for first-time users.
+- **Strategy builder/organizer**: A structured way for users to define their trading conditions, rules, and strategy plan (lives on `/dashboard` or `/strategy-builder`).
+- **Statistical significance indicator**: Dashboard shows confidence level based on trade sample size so users know when they've backtested enough.
+- **Simple value communication**: Landing page copy must be dead simple. No jargon. Speak directly to the user's self-interest.
+- **Mobile-responsive**: All SaaS pages (landing, dashboard, billing) must work on mobile. The chart tool itself is desktop-focused.
+
+### Product Requirements from Persona (Future - DO NOT BUILD)
+
+> These are documented in AGENTS.md under "Product Requirements Derived from Persona".
+> They are categorized as "Build Later" and must NOT be built until Mason says so.
+
+- Motivation/accountability system (goals, reminders, schedule management)
+- Text/email reminders to backtest
+- AI-powered strategy formulation assistant
+- Strategy condition validator ("did I follow my rules?")
+
+See AGENTS.md for full details.
 
 ---
 
