@@ -820,7 +820,7 @@ QA agents additionally read:
 - Orchestrator verifies specs were written, updates TRACKER.md
 
 **Step 2 — Coding** (Orchestrator coordinates):
-- For small tasks: Orchestrator spawns Coder sub-agents via Task tool (up to 4 in parallel)
+- For small tasks: Orchestrator spawns Coder sub-agents via Task tool (max 3 in parallel)
 - For large tasks: Orchestrator tells Mason "Open a new Composer, paste this prompt: [...]"
 - Each Coder reads only its task spec file (self-contained, ~50 lines, not the whole plan)
 - Each Coder updates TRACKER.md when done (its row only)
@@ -866,16 +866,14 @@ This inner loop runs automatically. Mason only gets involved at phase-level chec
 
 ## Parallel Execution Strategy
 
-### Which Agents Can Run in Parallel
+### Which Agents Can Run in Parallel (max 3 at a time)
 
 | Agent | Parallel With | Notes |
 |-------|---------------|-------|
 | Architect | Nothing | Must complete before coders |
-| Coder A | Coder B, C, ... | As long as tasks have no dependencies on each other |
-| QA (Task A) | QA (Task B) | Independent tasks can be tested in parallel |
-| Gap Analyst | Persona Agent, Security Reviewer | All three review agents run in parallel |
-| Persona Agent | Gap Analyst, Security Reviewer | All three review agents run in parallel |
-| Security Reviewer | Gap Analyst, Persona Agent | All three review agents run in parallel |
+| Coder A | Coder B, Coder C | Max 3 coders. No overlapping files. |
+| QA (Task A) | QA (Task B), QA (Task C) | Max 3. Independent tasks only. |
+| Gap Analyst | Persona Agent, Security Reviewer | Exactly 3 — fits the limit |
 | Feedback Aggregator | Nothing | Needs all reviews complete first |
 
 ### Phase-Level Parallelism
@@ -887,10 +885,22 @@ Some phases can overlap:
 
 ### Max Parallelism Per Step
 
-- **Step 2 (Coding)**: Up to 4 Coder agents simultaneously (limited by task independence)
-- **Step 3 (QA)**: Up to 4 QA agents simultaneously
-- **Step 4 (Reviews)**: Always 3 agents (Gap, Persona, Security) simultaneously
-- **Total**: Never more than 4 agents running at once in any step
+**Hard limit: 3 concurrent agents maximum.** This limit exists for two reasons:
+1. **Machine resources** — each Cursor Composer / sub-agent consumes RAM and CPU. On most machines, 3 concurrent agents is the sweet spot. More than that and you risk slowdowns, context window thrashing, and your machine becoming unresponsive (especially if you're also running other apps).
+2. **Coordination complexity** — more parallel agents = more potential for file conflicts and harder to track.
+
+Resource considerations:
+- Each Cursor agent uses roughly 500MB-1GB of RAM for its context/model interaction
+- 3 agents + Cursor itself + your OS = ~6-8GB RAM usage. If you have 16GB, you're fine. 8GB will be tight.
+- CPU spikes during agent responses but is mostly idle while waiting for API round-trips
+- Network bandwidth is the actual bottleneck — all agents call the LLM API concurrently, but this is Cursor's infrastructure, not yours
+- If your machine starts lagging, drop to 2 concurrent agents
+
+Parallelism by step:
+- **Step 2 (Coding)**: Max 3 Coder agents simultaneously
+- **Step 3 (QA)**: Max 3 QA agents simultaneously (usually fewer needed)
+- **Step 4 (Reviews)**: 3 agents (Gap, Persona, Security) — fits exactly at the limit
+- **Total**: Never more than 3 agents running at once
 
 ---
 
