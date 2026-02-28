@@ -8,9 +8,10 @@
 5. [API Endpoints Reference](#api-endpoints-reference)
 6. [Frontend (arkon.html)](#frontend-arkonhtml)
 7. [Deployment Pipeline](#deployment-pipeline)
-8. [Initiative 1: Private Backtesting Route (/pvt)](#initiative-1-private-backtesting-route-pvt)
-9. [Initiative 2: Chad Backtesting SaaS Product](#initiative-2-chad-backtesting-saas-product)
-10. [Task Breakdown](#task-breakdown)
+8. [Security, SSL & Auth Architecture](#security-ssl--auth-architecture)
+9. [Initiative 1: Private Backtesting Route (/pvt)](#initiative-1-private-backtesting-route-pvt)
+10. [Initiative 2: Chad Backtesting SaaS Product](#initiative-2-chad-backtesting-saas-product)
+11. [Task Breakdown](#task-breakdown)
 
 ---
 
@@ -46,46 +47,78 @@ An **nginx reverse proxy** is needed on the Hetzner server to handle:
 3. **Proxy pass** to uvicorn on `127.0.0.1:8000`
 4. **HTTP → HTTPS redirect** on port 80
 
-#### Target nginx config (conceptual)
+#### Target nginx config (production-hardened)
 
 ```nginx
-# Redirect www → non-www (301)
+# Redirect ALL HTTP → HTTPS (both www and non-www)
 server {
     listen 80;
-    listen 443 ssl;
+    server_name chadbacktesting.com www.chadbacktesting.com;
+
+    # Let's Encrypt ACME challenge must remain on HTTP
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://chadbacktesting.com$request_uri;
+    }
+}
+
+# Redirect www HTTPS → non-www HTTPS (301)
+server {
+    listen 443 ssl http2;
     server_name www.chadbacktesting.com;
 
     ssl_certificate /etc/letsencrypt/live/chadbacktesting.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/chadbacktesting.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
 
     return 301 https://chadbacktesting.com$request_uri;
 }
 
-# HTTP → HTTPS redirect
+# Main server block - chadbacktesting.com (HTTPS only)
 server {
-    listen 80;
-    server_name chadbacktesting.com;
-    return 301 https://chadbacktesting.com$request_uri;
-}
-
-# Main server block
-server {
-    listen 443 ssl;
+    listen 443 ssl http2;
     server_name chadbacktesting.com;
 
+    # --- SSL / TLS ---
     ssl_certificate /etc/letsencrypt/live/chadbacktesting.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/chadbacktesting.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_tickets off;
+    ssl_stapling on;
+    ssl_stapling_verify on;
 
-    # Proxy everything to uvicorn
+    # --- Security Headers ---
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # --- Upload size limit (for screenshots) ---
+    client_max_body_size 10M;
+
+    # --- Rate limiting zone (defined in http block, see note below) ---
+    # limit_req zone=api burst=20 nodelay;
+
+    # --- Proxy to uvicorn ---
     location / {
         proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_redirect off;
     }
 
-    # WebSocket support
+    # --- WebSocket support ---
     location /ws/ {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
@@ -93,9 +126,22 @@ server {
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 86400;
+        proxy_send_timeout 86400;
     }
+
+    # --- Block direct access to sensitive paths ---
+    location ~ /\.env { deny all; return 404; }
+    location ~ /\.git { deny all; return 404; }
 }
+```
+
+**Note**: Rate limiting (`limit_req_zone`) must be defined in the `http {}` block of `/etc/nginx/nginx.conf`:
+```nginx
+# In /etc/nginx/nginx.conf, inside http { }
+limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
 ```
 
 #### Setup commands (on server)
@@ -483,6 +529,243 @@ nohup python3 -m uvicorn mbo_streaming_server:app --host 0.0.0.0 --port 8000 > s
 
 ---
 
+## Security, SSL & Auth Architecture
+
+### SSL / TLS (Let's Encrypt)
+
+All traffic MUST go through HTTPS. No exceptions.
+
+| Layer | Implementation |
+|-------|---------------|
+| **Certificate provider** | Let's Encrypt (free, auto-renewable) |
+| **Certificate manager** | certbot with nginx plugin |
+| **SSL termination** | nginx (uvicorn never sees raw TLS) |
+| **Protocols** | TLSv1.2 and TLSv1.3 only (no TLS 1.0/1.1) |
+| **HSTS** | `Strict-Transport-Security: max-age=63072000; includeSubDomains; preload` |
+| **Auto-renewal** | certbot timer (verify: `systemctl status certbot.timer`) |
+| **Cert scope** | Covers both `chadbacktesting.com` and `www.chadbacktesting.com` |
+
+### Authentication Flow (Google OAuth 2.0)
+
+```
+User clicks "Sign in with Google"
+    → Browser redirects to Google OAuth consent screen
+    → User authorizes
+    → Google redirects to https://chadbacktesting.com/auth/callback?code=...
+    → Server exchanges code for Google tokens (server-side, never exposed to browser)
+    → Server extracts user profile (google_id, email, name, avatar)
+    → Server creates or finds user in `users` table
+    → Server issues a session token (signed JWT or session ID)
+    → Token stored in secure httpOnly cookie
+    → Browser redirected to /dashboard or /app
+```
+
+### Session / Cookie Security
+
+| Property | Value | Reason |
+|----------|-------|--------|
+| `httpOnly` | `true` | Prevents JavaScript access (XSS mitigation) |
+| `Secure` | `true` | Cookie only sent over HTTPS |
+| `SameSite` | `Lax` | CSRF mitigation while allowing OAuth redirects |
+| `Path` | `/` | Available across the whole site |
+| `Max-Age` | `604800` (7 days) | Reasonable session lifetime |
+| **Signing** | HMAC-SHA256 with server secret | Prevents tampering |
+
+### API Endpoint Protection Matrix
+
+After auth is implemented, endpoints will be categorized:
+
+| Category | Endpoints | Auth Required | Notes |
+|----------|-----------|---------------|-------|
+| **Public** | `/`, `/health`, `/auth/*` | No | Landing page, health check, OAuth flow |
+| **Public API** | `/api/news`, `/api/cache/available_dates`, `/api/fields` | No | Read-only public data |
+| **Authenticated** | `/app`, `/dashboard`, `/billing`, `/account` | Google Sign-In | Any logged-in user (Free, GigaChad, MegaChad) |
+| **Authenticated API** | `/api/strategies`, `/api/trades`, `/api/strategy_settings`, `/api/images/*` | Google Sign-In + owner check | User can only access their own data |
+| **Authenticated API** | `/api/mbo/*`, `/ws/mbo/*`, `/ws/hybrid/*` | Google Sign-In | Market data - any authenticated user |
+| **Paid tier only** | `/learn/*` (future) | Google Sign-In + GigaChad/MegaChad | Learning Area |
+| **Private** | `/pvt` | No SaaS auth; protected separately (see below) | Mason's private backtesting |
+| **Internal** | `/admin` | Google Sign-In + admin flag | Mason only |
+| **Webhook** | `/api/stripe/webhook` | Stripe signature verification | No user auth; verified by Stripe signing secret |
+| **Dangerous** | `/api/cache/clear`, `/api/trades/purge` | Authenticated + admin only | Destructive operations |
+
+### Private Route (`/pvt`) Protection
+
+The `/pvt` route is Mason's personal backtesting tool and must NOT require Google Sign-In (it predates the SaaS). Protection options:
+
+- **Option A (recommended)**: Secret query parameter — `/pvt?key=<secret>` — server checks against env var `PVT_ACCESS_KEY`
+- **Option B**: nginx basic auth — password-protect `/pvt` at the nginx level
+- **Option C**: IP whitelist in nginx — only allow Mason's IP(s)
+- **Option D**: No protection — rely on the URL being unlinked/unlisted (security through obscurity, not recommended)
+
+Choose during implementation. The key requirement: `/pvt` works without Google Sign-In but is not trivially discoverable by random users.
+
+### CORS Policy
+
+**Current state (INSECURE)**: `allow_origins=["*"]` in `mbo_streaming_server.py` line ~1160.
+
+**Target state**: Lock down to the production domain:
+```python
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://chadbacktesting.com"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+During development, can temporarily include `http://localhost:8000` as well.
+
+### WebSocket Authentication
+
+Currently WebSocket connections (`/ws/mbo/*`, `/ws/hybrid/*`) have no authentication. After auth is implemented:
+
+- The WebSocket handshake should carry the session cookie (browsers automatically send cookies on same-origin WS connections)
+- The server should validate the session on the initial WS handshake and reject unauthenticated connections
+- The `/pvt` WebSocket usage (from arkon.html at `/pvt`) needs to work with the `/pvt` auth mechanism, not Google Sign-In
+
+### Stripe Webhook Security
+
+Stripe webhooks MUST be verified using the webhook signing secret:
+```python
+import stripe
+stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
+```
+Never trust webhook data without signature verification. The `webhook_secret` comes from the Stripe dashboard and is stored as an environment variable.
+
+### Image Upload Security
+
+Current `POST /api/images/upload` needs hardening:
+- **File type validation**: Only allow `.png`, `.jpg`, `.jpeg`, `.webp`
+- **File size limit**: 10MB max (enforced by nginx `client_max_body_size` AND server-side)
+- **Filename sanitization**: Strip path traversal characters, generate UUID filenames
+- **Storage isolation**: Each user's screenshots stored under `/uploads/<user_id>/` to prevent cross-user access
+
+### Secrets / Environment Variables
+
+**NEVER commit secrets to git.** All secrets stored as environment variables on the server via a `.env` file at `/opt/mbo_server/.env`:
+
+| Variable | Purpose | When Needed |
+|----------|---------|-------------|
+| `GOOGLE_CLIENT_ID` | Google OAuth 2.0 Client ID | Phase 4 (Auth) |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth 2.0 Client Secret | Phase 4 (Auth) |
+| `SESSION_SECRET` | JWT/cookie signing key (random 64+ char string) | Phase 4 (Auth) |
+| `PVT_ACCESS_KEY` | Secret key for `/pvt` route access | Phase 2 (Private Route) |
+| `STRIPE_SECRET_KEY` | Stripe API secret key | Phase 5 (Payments) |
+| `STRIPE_PUBLISHABLE_KEY` | Stripe public key (safe for frontend) | Phase 5 (Payments) |
+| `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret | Phase 5 (Payments) |
+| `ANTHROPIC_API_KEY` | Claude Haiku API key | Phase 8 (Future - Learning Area) |
+
+The server loads these via `python-dotenv` (already a dependency). The `.env` file must be in `.gitignore` and never deployed via git.
+
+### nginx Security Headers
+
+Already included in the hardened nginx config above:
+- `Strict-Transport-Security` (HSTS) — force HTTPS for 2 years
+- `X-Frame-Options: SAMEORIGIN` — prevent clickjacking
+- `X-Content-Type-Options: nosniff` — prevent MIME sniffing
+- `X-XSS-Protection: 1; mode=block` — legacy XSS filter
+- `Referrer-Policy: strict-origin-when-cross-origin` — control referrer leakage
+
+### Rate Limiting
+
+nginx rate limiting to prevent abuse (especially important for free tier):
+- **Global**: 10 requests/second per IP (burst 20)
+- **Auth endpoints**: 5 requests/second per IP (prevent brute force on OAuth)
+- **API write endpoints**: 5 requests/second per IP (prevent spam)
+- **WebSocket**: Connection limit per IP (e.g., max 10 concurrent WS connections)
+
+---
+
+## Database Migration Strategy
+
+### New `users` Table (Added in Phase 4)
+
+```sql
+CREATE TABLE users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    google_id TEXT UNIQUE NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    name TEXT,
+    avatar_url TEXT,
+    subscription_tier TEXT NOT NULL DEFAULT 'free',  -- 'free', 'gigachad', 'megachad'
+    stripe_customer_id TEXT,
+    is_admin INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL,
+    last_login_at TEXT NOT NULL
+);
+```
+
+### Migrating Mason's Existing Data
+
+Mason's existing strategies, trades, and settings use `owner: "Mason"` (or similar). When the `users` table is added:
+
+1. Create Mason's user record with his Google account
+2. **DO NOT modify existing data.** Instead, add a mapping layer:
+   - Mason's Google ID maps to owner `"Mason"` (or whatever his current owner string is)
+   - New SaaS users get their Google ID or email as their owner string
+3. This preserves all existing data while integrating with the new auth system
+
+### SQLite Scalability Note
+
+SQLite works fine for the initial launch. If the product grows to hundreds of concurrent users, consider migrating to PostgreSQL. The current codebase uses raw SQL, so migration would involve:
+- Changing the connection library (sqlite3 → asyncpg/psycopg2)
+- Minor SQL syntax adjustments
+- Setting up PostgreSQL on the server
+
+This is a future concern, not a launch blocker.
+
+---
+
+## Monitoring & Operations
+
+### Health Monitoring
+
+- **`/health` endpoint**: Already exists, returns cache stats and feature flags
+- **Uptime monitoring**: Set up a free external monitor (UptimeRobot, Better Uptime) to ping `https://chadbacktesting.com/health` every 5 minutes
+- **SSL expiry monitoring**: certbot auto-renews, but monitor cert expiry as a safety net
+
+### Logging
+
+- **Server logs**: `/opt/mbo_server/server.log` (uvicorn output)
+- **nginx access logs**: `/var/log/nginx/access.log`
+- **nginx error logs**: `/var/log/nginx/error.log`
+- **Add structured logging**: After SaaS launch, add JSON logging with user ID, request path, response time for analytics
+
+### Error Tracking
+
+- Set up Sentry (or similar) in Phase 7 for automatic error capture
+- Both server-side (Python) and client-side (JavaScript in arkon.html and SaaS pages)
+
+### Backups
+
+- **Database**: Automated daily backup of `strategies.db` (existing `backup_database.bat` + schedule)
+- **After SaaS launch**: Increase backup frequency, add off-server backup destination
+- **Market data cache**: Large but regenerable — lower backup priority
+- **User uploads (screenshots)**: Should be included in backup plan
+
+---
+
+## arkon.html Auth Integration (for SaaS users)
+
+When `arkon.html` is served to authenticated SaaS users at `/app`, it needs to send auth credentials with API calls. Currently it does not.
+
+### How It Will Work
+
+1. The session cookie (httpOnly, Secure) is set on the `chadbacktesting.com` domain
+2. Since arkon.html is served from the same domain (`/app`), the browser automatically includes the cookie in all fetch() and WebSocket requests to the same origin
+3. **No changes to arkon.html's `fetch()` calls are needed** if using httpOnly cookies — the browser handles it
+4. The server-side auth middleware reads the cookie from the request, validates it, and extracts the user ID
+5. The middleware injects the user's `owner` value before the route handler processes the request
+
+### What DOES Need to Change in arkon.html (Eventually)
+
+- The "Who is using Arkon?" modal (user selection) should be **removed or auto-populated** for SaaS users — they're identified by their Google account, not by manually selecting a name
+- The `owner` value currently comes from a cookie/modal selection — for SaaS users it should come from the authenticated session
+- The `computeBaseUrls()` function already handles HTTPS correctly (the `api.startsWith('https')` → `wss://` path works)
+
+---
+
 ## Initiative 1: Private Backtesting Route (/pvt)
 
 ### Goal
@@ -586,7 +869,7 @@ The backtesting chart (`arkon.html`) stays in `arkon/` and is served directly by
 |------|-------|---------------|
 | **Free** | $0/mo | Full backtesting tool access. Load any available data, backtest freely, save trades, strategies, trade journaling, screenshots, tags - everything the tool does today. No restrictions on core features. |
 | **GigaChad** | $250/mo | Everything in Free + AI Indicator Generator + Learning Area (interactive courses with AI scenario coaching) |
-| **MegaChad** | TBD | Everything in GigaChad + AI Chad Coach with voice-narrated retroactive analysis |
+| **MegaChad** | $100/mo | Everything in GigaChad + AI Chad Coach with voice-narrated retroactive analysis |
 
 **Important: The Free tier is generous by design.** Every user gets the full backtesting experience for free with zero restrictions on the core tool. Paid tiers are for advanced AI-powered features and the educational Learning Area.
 
@@ -695,7 +978,7 @@ A full interactive education system where:
 
 This feature requires Mason to flesh out the full UX, the course authoring interface, scenario setup flow, and the specific Claude Haiku prompt engineering before any implementation begins.
 
-#### FUTURE: AI Chad Coach - Voice Analysis (MegaChad Tier - Price TBD)
+#### FUTURE: AI Chad Coach - Voice Analysis (MegaChad Tier - $100/mo)
 
 **Status: DO NOT BUILD. Documentation only. Mason will flesh out this feature personally.**
 
@@ -727,19 +1010,32 @@ This is the most advanced feature. It requires significant design work from Maso
 - [ ] **T0.3** - Decide on frontend framework
 - [ ] **T0.4** - Set up project scaffold in `chadbacktesting/` based on architecture decisions
 
-### Phase 1: Server Infrastructure (nginx, SSL, Domain)
+### Phase 1: Server Infrastructure (nginx, SSL, Domain, Security Hardening)
 
 - [ ] **T1.1** - Install nginx on Hetzner server
-- [ ] **T1.2** - Configure nginx as reverse proxy to uvicorn on port 8000
-- [ ] **T1.3** - Install certbot and obtain Let's Encrypt SSL cert for `chadbacktesting.com` + `www.chadbacktesting.com`
-- [ ] **T1.4** - Configure nginx 301 redirect: `www.chadbacktesting.com` → `chadbacktesting.com`
-- [ ] **T1.5** - Configure nginx HTTP → HTTPS redirect on port 80
-- [ ] **T1.6** - Configure nginx WebSocket proxy for `/ws/` paths
-- [ ] **T1.7** - Test: `https://chadbacktesting.com/` serves the app correctly (temporarily still arkon.html)
-- [ ] **T1.8** - Test: `https://www.chadbacktesting.com/` 301 redirects to `https://chadbacktesting.com/`
-- [ ] **T1.9** - Test: WebSocket connections work through nginx (`wss://chadbacktesting.com/ws/...`)
-- [ ] **T1.10** - Update `arkon.html` `computeBaseUrls()` to handle HTTPS origin / `chadbacktesting.com` domain correctly
-- [ ] **T1.11** - Decide: lock down direct IP:8000 access or keep as fallback during dev
+- [ ] **T1.2** - Install certbot and obtain Let's Encrypt SSL cert for `chadbacktesting.com` + `www.chadbacktesting.com`
+- [ ] **T1.3** - Deploy the production-hardened nginx config (see Domain & DNS section above) with:
+  - HTTPS-only with TLSv1.2/1.3
+  - HSTS, X-Frame-Options, X-Content-Type-Options, X-XSS-Protection, Referrer-Policy headers
+  - HTTP → HTTPS redirect on port 80
+  - 301 redirect: `www.chadbacktesting.com` → `chadbacktesting.com`
+  - Reverse proxy to uvicorn on `127.0.0.1:8000`
+  - WebSocket proxy for `/ws/` paths with upgrade headers
+  - `client_max_body_size 10M` for screenshot uploads
+  - ACME challenge passthrough for cert renewal
+  - Block access to `.env` and `.git` paths
+- [ ] **T1.4** - Add rate limiting zone in `/etc/nginx/nginx.conf` http block
+- [ ] **T1.5** - Change `start_server_background.sh` to bind uvicorn to `127.0.0.1:8000` (not `0.0.0.0`)
+- [ ] **T1.6** - Create `.env` file at `/opt/mbo_server/.env` for secrets (initially just `PVT_ACCESS_KEY`)
+- [ ] **T1.7** - Add `.env` to `.gitignore` in both `arkon/` and `chadbacktesting/`
+- [ ] **T1.8** - Test: `https://chadbacktesting.com/` serves the app correctly over HTTPS
+- [ ] **T1.9** - Test: `https://www.chadbacktesting.com/` 301 redirects to non-www
+- [ ] **T1.10** - Test: `http://chadbacktesting.com/` redirects to HTTPS
+- [ ] **T1.11** - Test: WebSocket connections work through nginx (`wss://chadbacktesting.com/ws/...`)
+- [ ] **T1.12** - Test: SSL Labs test (ssllabs.com) gets A or A+ rating
+- [ ] **T1.13** - Update `arkon.html` `computeBaseUrls()` to handle HTTPS origin correctly
+- [ ] **T1.14** - Verify certbot auto-renewal timer is active (`systemctl status certbot.timer`)
+- [ ] **T1.15** - Set up UptimeRobot or similar free monitor on `https://chadbacktesting.com/health`
 
 ### Phase 2: Private Route Migration (Initiative 1)
 
@@ -758,46 +1054,62 @@ This is the most advanced feature. It requires significant design work from Maso
 - [ ] **T3.4** - Add email collection / waitlist functionality
 - [ ] **T3.5** - Verify `/pvt` still works after root changes
 
-### Phase 4: Google Sign-In Authentication
+### Phase 4: Google Sign-In Authentication & Security
 
 - [ ] **T4.1** - Set up Google Cloud project and OAuth 2.0 credentials (Client ID, Client Secret)
-- [ ] **T4.2** - Add `users` table to the database (google_id, email, name, avatar_url, subscription_tier, stripe_customer_id, created_at)
-- [ ] **T4.3** - Implement Google OAuth flow on the server (redirect to Google, handle callback, create/find user, issue session)
-- [ ] **T4.4** - Build "Sign in with Google" button on landing page and any auth-required pages
-- [ ] **T4.5** - Implement session management (JWT or httpOnly cookies)
-- [ ] **T4.6** - Add auth middleware to protect `/app` (backtesting tool) and `/api/*` endpoints
-- [ ] **T4.7** - Map authenticated user's Google ID/email to the `owner` field in strategies/trades
-- [ ] **T4.8** - Ensure `/pvt` route bypasses SaaS auth (Mason's private access, no Google login needed)
-- [ ] **T4.9** - All Free tier users get full backtesting access after signing in (no paywall for core features)
+- [ ] **T4.2** - Store `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SESSION_SECRET` in `/opt/mbo_server/.env`
+- [ ] **T4.3** - Add `users` table to the database (see Database Migration Strategy section for schema)
+- [ ] **T4.4** - Implement Google OAuth flow: `/auth/google` (redirect) → `/auth/callback` (handle code exchange) → create/find user → issue session
+- [ ] **T4.5** - Implement session management with secure httpOnly cookies (Secure, SameSite=Lax, signed with SESSION_SECRET)
+- [ ] **T4.6** - Build "Sign in with Google" button on landing page and any auth-required pages
+- [ ] **T4.7** - Add auth middleware to protect `/app`, `/dashboard`, `/billing`, `/account` pages
+- [ ] **T4.8** - Add auth middleware to protect user-specific API endpoints (`/api/strategies`, `/api/trades`, `/api/strategy_settings`, `/api/images/*`) — enforce `owner` matches authenticated user
+- [ ] **T4.9** - Map authenticated user's Google ID/email to the `owner` field in strategies/trades
+- [ ] **T4.10** - Create Mason's user record and map to his existing `owner` value to preserve all current data
+- [ ] **T4.11** - Ensure `/pvt` route uses separate auth (secret key, not Google Sign-In)
+- [ ] **T4.12** - Add WebSocket auth: validate session cookie on WS handshake, reject unauthenticated connections
+- [ ] **T4.13** - Lock down CORS: change `allow_origins` from `["*"]` to `["https://chadbacktesting.com"]`
+- [ ] **T4.14** - Remove or auto-populate the "Who is using Arkon?" user selection modal for SaaS users in arkon.html
+- [ ] **T4.15** - All Free tier users get full backtesting access after signing in (no paywall for core features)
+- [ ] **T4.16** - Add `/auth/logout` endpoint that clears the session cookie
 
 ### Phase 5: Stripe Payments (for GigaChad / MegaChad tiers only)
 
 - [ ] **T5.1** - Mason provides Stripe API keys (test + live) - **BLOCKED until Mason provides**
-- [ ] **T5.2** - Create Stripe Products and Prices: GigaChad ($250/mo), MegaChad (price TBD)
-- [ ] **T5.3** - Implement Stripe Checkout flow (Free user → upgrade to paid tier)
-- [ ] **T5.4** - Implement `/api/stripe/webhook` endpoint for subscription lifecycle events
-- [ ] **T5.5** - Set up Stripe Customer Portal for self-service subscription management
-- [ ] **T5.6** - Store subscription tier on user record, update via webhooks
-- [ ] **T5.7** - Build `/billing` page with current tier, upgrade options, manage subscription
-- [ ] **T5.8** - Test full flow: sign in (Free) → upgrade to GigaChad → manage → cancel → revert to Free
-- [ ] **T5.9** - Note: Paid tier features (AI Indicator Generator, AI Chad Coach) are NOT built yet. Subscription upgrade should work but gated features show "Coming Soon" until Mason says to build them.
+- [ ] **T5.2** - Store `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET` in `.env`
+- [ ] **T5.3** - Create Stripe Products and Prices: GigaChad ($250/mo), MegaChad ($100/mo)
+- [ ] **T5.4** - Implement Stripe Checkout flow (Free user → upgrade to paid tier)
+- [ ] **T5.5** - Implement `/api/stripe/webhook` endpoint with **signature verification** (reject unverified webhooks)
+- [ ] **T5.6** - Set up Stripe Customer Portal for self-service subscription management
+- [ ] **T5.7** - Store `subscription_tier` and `stripe_customer_id` on user record, update via webhook events
+- [ ] **T5.8** - Build `/billing` page with current tier, upgrade options, manage subscription link
+- [ ] **T5.9** - Test full flow: sign in (Free) → upgrade to GigaChad → manage → cancel → revert to Free
+- [ ] **T5.10** - Paid tier features (AI Indicator Generator, Learning Area, AI Chad Coach) are NOT built yet. Gated features show "Coming Soon" until Mason says to build them.
+- [ ] **T5.11** - Handle edge cases: payment failure → grace period → downgrade to Free; duplicate webhook delivery; subscription upgrade/downgrade between GigaChad ↔ MegaChad
 
-### Phase 6: Multi-tenant Backtesting
+### Phase 6: Multi-tenant Backtesting & Dashboard
 
-- [ ] **T6.1** - Ensure each user's data is properly isolated (strategies, trades, settings)
-- [ ] **T6.2** - Add per-user data storage limits
-- [ ] **T6.3** - Implement user-specific screenshot storage paths
-- [ ] **T6.4** - Build `/dashboard` with user's strategies and performance stats
-- [ ] **T6.5** - Build `/admin` panel for user/subscription management (internal)
+- [ ] **T6.1** - Enforce data isolation: every API query filters by authenticated user's `owner` value
+- [ ] **T6.2** - Implement user-specific screenshot storage paths (`/uploads/<user_id>/`)
+- [ ] **T6.3** - Build `/dashboard` with user's strategies, trade count, win rate, P&L summary
+- [ ] **T6.4** - Build `/account` page with Google profile info, subscription tier, sign-out
+- [ ] **T6.5** - Build `/admin` panel (Mason-only): user list, subscription breakdown, total trades, storage usage
+- [ ] **T6.6** - Harden destructive endpoints: `/api/cache/clear` and `/api/trades/purge` require admin auth only
+- [ ] **T6.7** - Add per-user screenshot storage limits (e.g., 500MB per user)
 
 ### Phase 7: Polish & Launch
 
-- [ ] **T7.1** - SEO optimization (meta tags, sitemap, robots.txt)
-- [ ] **T7.2** - Performance testing / load testing
-- [ ] **T7.3** - Error monitoring (Sentry or similar)
-- [ ] **T7.4** - Analytics (Mixpanel / PostHog / Google Analytics)
-- [ ] **T7.5** - Legal pages (Terms of Service, Privacy Policy)
-- [ ] **T7.6** - Public launch
+- [ ] **T7.1** - SEO: meta tags (Open Graph, Twitter Card), sitemap.xml, robots.txt
+- [ ] **T7.2** - Custom 404 and error pages (GigaChad themed)
+- [ ] **T7.3** - Error monitoring: Sentry for both Python server and JavaScript client
+- [ ] **T7.4** - Analytics: Google Analytics or PostHog on landing page and dashboard
+- [ ] **T7.5** - Legal pages: Terms of Service, Privacy Policy (required for Google OAuth and Stripe)
+- [ ] **T7.6** - Performance testing: load test with multiple concurrent WebSocket connections
+- [ ] **T7.7** - Security audit: run SSL Labs test, verify all headers, check CORS, review auth flows
+- [ ] **T7.8** - Automated database backup (daily cron job on server, backup to off-server location)
+- [ ] **T7.9** - Log rotation for `server.log` and nginx logs (logrotate config)
+- [ ] **T7.10** - Favicon and social media preview images (GigaChad branded)
+- [ ] **T7.11** - Public launch
 
 ### Phase 8: Future Premium Features (DO NOT START - MASON WILL INITIATE)
 
@@ -883,24 +1195,37 @@ cd c:\Users\mason\Documents\arkon
 
 ## Files That Agents Will Need to Modify
 
-### Infrastructure (nginx, SSL, Domain)
-1. Server: Install nginx, certbot - commands run via SSH
-2. Server: Create `/etc/nginx/sites-available/chadbacktesting.com` config
-3. Server: Symlink to `/etc/nginx/sites-enabled/`
-4. `arkon/start_server_background.sh` - Potentially change `0.0.0.0` → `127.0.0.1` after nginx is set up
+### Infrastructure (nginx, SSL, Domain, Security)
+1. Server: Install nginx, certbot via SSH
+2. Server: `/etc/nginx/sites-available/chadbacktesting.com` — production-hardened config (see Domain & DNS section)
+3. Server: `/etc/nginx/nginx.conf` — add rate limiting zone in `http {}` block
+4. Server: Symlink sites-available → sites-enabled
+5. `arkon/start_server_background.sh` — change `0.0.0.0` → `127.0.0.1` after nginx is set up
+6. Server: `/opt/mbo_server/.env` — create with all secrets (see Security section for full list)
+7. Server: Set up logrotate for server.log and nginx logs
+8. Server: Set up automated daily database backup cron job
 
 ### Initiative 1 (Private Route)
-1. `arkon/mbo_streaming_server.py` - Add `/pvt` route (~line 1334)
-2. `arkon/update_frontend.sh` - Update URL references
-3. `arkon/update_frontend.bat` - Update URL references (if exists)
-4. `arkon/deploy_mbo_server.bat` - Update URL references
-5. `arkon/deploy_mbo_server.sh` - Update URL references
+1. `arkon/mbo_streaming_server.py` — Add `/pvt` route (~line 1334), add `.env` loading for `PVT_ACCESS_KEY`
+2. `arkon/update_frontend.sh` — Update URL references
+3. `arkon/update_frontend.bat` — Update URL references
+4. `arkon/deploy_mbo_server.bat` — Update URL references
+5. `arkon/deploy_mbo_server.sh` — Update URL references
 
 ### Initiative 2 (SaaS Product)
-1. `chadbacktesting/` - SaaS-only code (landing page, auth pages, dashboard, billing pages, deployment scripts)
-2. `arkon/mbo_streaming_server.py` - Add SaaS routes (landing page serving, auth middleware, Stripe webhook endpoint, user management API)
-3. `arkon/arkon.html` - Potentially add auth token handling for API calls when served to SaaS users
-4. Server: nginx config for domain routing, SSL, www redirect
+1. `chadbacktesting/` — SaaS-only code (landing page, dashboard, billing pages, deployment scripts, nginx configs, brand assets)
+2. `arkon/mbo_streaming_server.py` — Major additions:
+   - Google OAuth routes (`/auth/google`, `/auth/callback`, `/auth/logout`)
+   - `users` table and user management
+   - Auth middleware (session validation on protected routes)
+   - Owner enforcement on user-specific API endpoints
+   - WebSocket auth on handshake
+   - Stripe webhook endpoint with signature verification
+   - CORS lockdown from `*` to `chadbacktesting.com`
+   - Landing page and SaaS page serving routes
+   - Admin routes
+3. `arkon/arkon.html` — Remove/auto-populate "Who is using Arkon?" modal for SaaS users; owner auto-set from session
+4. Server: nginx config, SSL certs, rate limiting, security headers
 
 ### What `chadbacktesting/` Repo Contains (and Does NOT Contain)
 
