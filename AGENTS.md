@@ -8,14 +8,170 @@
 
 ## Table of Contents
 
-1. [Target User Persona](#target-user-persona)
-2. [Product Requirements Derived from Persona](#product-requirements-derived-from-persona)
-3. [Agent Roles](#agent-roles)
-4. [Agent Flow Architecture](#agent-flow-architecture)
-5. [The Recursive Build Loop](#the-recursive-build-loop)
-6. [Context & Document System](#context--document-system)
-7. [Phase Execution Playbooks](#phase-execution-playbooks)
-8. [Parallel Execution Strategy](#parallel-execution-strategy)
+1. [How This Works in Cursor (Practical Guide)](#how-this-works-in-cursor-practical-guide)
+2. [Mason's Approval Workflow](#masons-approval-workflow)
+3. [Target User Persona](#target-user-persona)
+4. [Product Requirements Derived from Persona](#product-requirements-derived-from-persona)
+5. [Agent Roles](#agent-roles)
+6. [Agent Flow Architecture](#agent-flow-architecture)
+7. [The Recursive Build Loop](#the-recursive-build-loop)
+8. [Context & Document System](#context--document-system)
+9. [Phase Execution Playbooks](#phase-execution-playbooks)
+10. [Parallel Execution Strategy](#parallel-execution-strategy)
+
+---
+
+## How This Works in Cursor (Practical Guide)
+
+### The Reality of Parallel Agents in Cursor
+
+Cursor doesn't have a built-in "orchestrator" that automatically spins up agent pipelines. Here's what actually happens:
+
+**Each "agent" = one Cursor Composer chat.** You open a new Composer tab, paste the agent's prompt (with its role and the files it should read), and let it run. Multiple Composer tabs can run simultaneously — that's your parallelism.
+
+### Step-by-Step: Running a Phase
+
+#### 1. You kick off the Architect (1 Composer tab)
+
+Open a new Composer. Paste the Architect prompt for the current phase. It reads PLAN.md and AGENTS.md, then writes task specs to `tasks/phase-N/`. Wait for it to finish.
+
+#### 2. You kick off Coders in parallel (multiple Composer tabs)
+
+The Architect's output tells you which tasks can run in parallel (Group A, Group B, etc.). For Group A tasks:
+
+- Open **Composer Tab 1**: "You are the Coder Agent. Read and implement `tasks/phase-1/T1.1-install-nginx.md`"
+- Open **Composer Tab 2**: "You are the Coder Agent. Read and implement `tasks/phase-1/T1.6-env-file.md`"
+- Open **Composer Tab 3**: "You are the Coder Agent. Read and implement `tasks/phase-1/T1.7-gitignore.md`"
+
+All three run at the same time, writing to different files. No conflicts because the Architect specifically assigned non-overlapping files to each.
+
+Once Group A finishes, kick off Group B the same way.
+
+#### 3. You kick off QA (1-2 Composer tabs)
+
+After coders finish, open a Composer for the QA Agent. It tests what was built. If tasks are independent, you can run multiple QA agents in parallel.
+
+#### 4. You kick off reviewers in parallel (3 Composer tabs)
+
+- **Tab 1**: Gap Analyst Agent
+- **Tab 2**: User Persona Agent
+- **Tab 3**: Security Reviewer Agent
+
+All three read the code and QA reports, write to separate files in `reviews/`. No conflicts.
+
+#### 5. You read the feedback and decide
+
+Open the feedback file. If there are critical issues, you paste the feedback into a new Architect Composer to scope fixes. If it's clean, you move to the next phase.
+
+### How File Conflicts Are Prevented
+
+The entire system is designed so parallel agents never touch the same file:
+
+| Agent | Writes To | Never Touches |
+|-------|-----------|---------------|
+| Architect | `tasks/phase-N/*.md` | Source code, status, qa, reviews |
+| Coder A | Specific source files + `status/T-A.md` | Files assigned to Coder B |
+| Coder B | Different source files + `status/T-B.md` | Files assigned to Coder A |
+| QA | `qa/*.md` | Source code, tasks |
+| Gap Analyst | `reviews/gap-*.md` | Source code, other review files |
+| Persona Agent | `reviews/persona-*.md` | Source code, other review files |
+| Security Reviewer | `reviews/security-*.md` | Source code, other review files |
+
+**If two agents need to modify the same file** (e.g., two tasks both touch `mbo_streaming_server.py`), they CANNOT run in parallel. The Architect must put them in sequential groups.
+
+### What You (Mason) Actually Do
+
+Your role in the loop:
+
+1. **Start each step** by opening Composer tabs with the right prompts
+2. **Glance at outputs** as they complete — you don't need to read every line, but skim the QA and review summaries
+3. **Make go/no-go decisions** — "phase looks good, move on" or "fix these issues first"
+4. **Approve or reject ideas** — Product Ideation Agent writes suggestions, you decide (see approval workflow below)
+5. **Provide blocked info** — when a task says "BLOCKED until Mason provides X" (like Stripe keys), you unblock it
+
+You are NOT doing the coding, testing, or reviewing. You're the project manager reading dashboards and saying "go" or "fix."
+
+### Quick-Start Prompt: Running Any Agent
+
+Copy-paste this into a new Composer, replacing the bracketed values:
+
+```
+Read chadbacktesting/AGENTS.md and chadbacktesting/PLAN.md.
+
+You are the [AGENT ROLE] for the Chad Backtesting project.
+Current phase: Phase [N].
+[If applicable: Current task: tasks/phase-N/[task-id].md]
+[If applicable: Prior feedback to address: feedback/phase-N-round-[M].md]
+
+Follow your role instructions exactly as defined in AGENTS.md.
+Write your output to the correct directory as specified in your role.
+```
+
+---
+
+## Mason's Approval Workflow
+
+### What Needs Mason's Approval
+
+Not everything runs autonomously. These checkpoints require Mason to explicitly sign off:
+
+| Checkpoint | When | What Mason Does |
+|------------|------|-----------------|
+| **Phase completion** | After feedback aggregation shows all-pass | Read the feedback summary, say "proceed to Phase N+1" or "fix X first" |
+| **Production deployment** | After any phase that changes the live server | Review what will be deployed, confirm "deploy it" |
+| **Product ideas** | After Product Ideation Agent writes suggestions | Read `reviews/ideas-*.md`, approve/reject/defer each idea |
+| **Architecture decisions** | When Architect flags an open question | Answer the question so the Coder can proceed |
+| **Blocked tasks** | When a task needs info only Mason has (Stripe keys, Google OAuth creds, etc.) | Provide the info |
+| **Scope changes** | When any agent suggests adding something not in PLAN.md | Approve or reject before it gets built |
+
+### How Product Ideation Approval Works
+
+The Product Ideation Agent writes ideas to `reviews/ideas-[date].md`. Each idea has this format:
+
+```markdown
+### Idea #1: [Name]
+**Description**: One-line summary
+**Why Jake cares**: [In Jake's voice]
+**Effort**: small / medium / large
+**Priority suggestion**: must-have / should-have / nice-to-have
+**Status**: PENDING MASON REVIEW
+```
+
+**Your workflow:**
+
+1. Open `reviews/ideas-[date].md` when you have a minute
+2. For each idea, change the `Status` line to one of:
+   - `APPROVED` — tell an Architect Agent to scope it into a task spec
+   - `APPROVED - LATER` — good idea, but not now. It stays documented.
+   - `REJECTED` — won't build this. Add a one-line reason if you want.
+   - `NEEDS DISCUSSION` — you want to modify the idea before deciding
+3. Only `APPROVED` ideas get turned into tasks. Everything else stays parked.
+
+**Example:**
+```markdown
+### Idea #3: Streak tracker
+**Description**: Show a "backtest streak" counter — how many days in a row you've practiced
+**Why Jake cares**: "I'd want to keep my streak going, like Duolingo"
+**Effort**: small
+**Priority suggestion**: should-have
+**Status**: APPROVED - LATER
+```
+
+Mason changed the status from `PENDING MASON REVIEW` to `APPROVED - LATER`. No agent will build this until Mason says "go build idea #3 from the ideas doc."
+
+### How to Communicate Decisions Back to Agents
+
+When you approve/reject things or make decisions, you have two options:
+
+**Option A (simple)**: Just tell the next agent in your Composer prompt. Example:
+```
+You are the Architect Agent. Read PLAN.md and AGENTS.md.
+Phase 3 is complete. Begin Phase 4.
+Also: I approved ideas #2 and #5 from reviews/ideas-2026-03-15.md.
+Scope them into Phase 4 tasks alongside the existing task list.
+```
+
+**Option B (tracked)**: Write your decision to a `feedback/mason-decisions-[date].md` file and tell agents to read it. Better for traceability.
 
 ---
 
