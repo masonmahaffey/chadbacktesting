@@ -23,88 +23,170 @@
 
 ## How This Works in Cursor (Practical Guide)
 
-### The Reality of Parallel Agents in Cursor
+### Two Execution Models
 
-Cursor doesn't have a built-in "orchestrator" that automatically spins up agent pipelines. Here's what actually happens:
+There are two ways to run this system. Use whichever fits the situation.
 
-**Each "agent" = one Cursor Composer chat.** You open a new Composer tab, paste the agent's prompt (with its role and the files it should read), and let it run. Multiple Composer tabs can run simultaneously — that's your parallelism.
+#### Model 1: Orchestrator Agent (Recommended for Most Steps)
 
-### Step-by-Step: Running a Phase
+You open **one** Composer chat. That agent acts as the orchestrator — it reads the tracker, figures out what needs to happen next, and uses Cursor's **Task tool** to spin up sub-agents for parallel work. The sub-agents do the actual coding/testing/reviewing and write their outputs to files. The orchestrator checks the results and decides what's next.
 
-#### 1. You kick off the Architect (1 Composer tab)
+**Your involvement**: You talk to ONE agent. It does the coordination. You approve checkpoints when asked.
 
-Open a new Composer. Paste the Architect prompt for the current phase. It reads PLAN.md and AGENTS.md, then writes task specs to `tasks/phase-N/`. Wait for it to finish.
+**Limitation**: Sub-agents from the Task tool have smaller context windows than a full Composer. They're good for focused tasks (write a specific function, test a specific endpoint, review a specific file) but not for massive multi-file refactors.
 
-#### 2. You kick off Coders in parallel (multiple Composer tabs)
+#### Model 2: Manual Parallel Composers (For Large Coding Tasks)
 
-The Architect's output tells you which tasks can run in parallel (Group A, Group B, etc.). For Group A tasks:
+For tasks that need a full context window (e.g., "rewrite the auth middleware across 3 files" or "build the entire landing page"), you open separate Composer tabs yourself. Each tab is a Coder Agent working on a non-overlapping set of files.
 
-- Open **Composer Tab 1**: "You are the Coder Agent. Read and implement `tasks/phase-1/T1.1-install-nginx.md`"
-- Open **Composer Tab 2**: "You are the Coder Agent. Read and implement `tasks/phase-1/T1.6-env-file.md`"
-- Open **Composer Tab 3**: "You are the Coder Agent. Read and implement `tasks/phase-1/T1.7-gitignore.md`"
+**Your involvement**: You open the tabs, paste the prompts, and check when they're done.
 
-All three run at the same time, writing to different files. No conflicts because the Architect specifically assigned non-overlapping files to each.
+#### When to Use Which
 
-Once Group A finishes, kick off Group B the same way.
+| Situation | Model |
+|-----------|-------|
+| Architect breaking a phase into specs | Model 1 (orchestrator) |
+| Small, focused coding tasks (add a route, create a config file) | Model 1 (orchestrator spawns sub-agents) |
+| Large coding tasks (build landing page, implement full OAuth flow) | Model 2 (separate Composer per task) |
+| QA testing | Model 1 (orchestrator spawns QA sub-agents) |
+| All three review agents (Gap, Persona, Security) | Model 1 (orchestrator spawns all three in parallel) |
+| Feedback aggregation | Model 1 (orchestrator reads reviews and summarizes) |
 
-#### 3. You kick off QA (1-2 Composer tabs)
+### The State Tracker: `TRACKER.md`
 
-After coders finish, open a Composer for the QA Agent. It tests what was built. If tasks are independent, you can run multiple QA agents in parallel.
+This is the single source of truth for what's done, what's in progress, and what's blocked. Every agent reads it before starting. Every agent updates it when they finish.
 
-#### 4. You kick off reviewers in parallel (3 Composer tabs)
+**Location**: `chadbacktesting/TRACKER.md`
 
-- **Tab 1**: Gap Analyst Agent
-- **Tab 2**: User Persona Agent
-- **Tab 3**: Security Reviewer Agent
+**Format**:
+```markdown
+# Project State Tracker
+Last updated: [ISO timestamp]
+Current phase: [N]
+Current round: [M]
 
-All three read the code and QA reports, write to separate files in `reviews/`. No conflicts.
+## Phase [N]: [Name]
 
-#### 5. You read the feedback and decide
+| Task | Status | Assignee | Files | Blocker | Notes |
+|------|--------|----------|-------|---------|-------|
+| T1.1 | DONE | Coder | /etc/nginx/... | — | Completed round 1 |
+| T1.2 | IN_PROGRESS | Coder-B | ssl certs | — | Running now |
+| T1.3 | BLOCKED | — | — | Needs T1.1 done | Dep on nginx install |
+| T1.4 | TODO | — | — | — | Not started |
+| T1.5 | NEEDS_FIX | Coder | start_server.sh | QA failed | See qa/T1.5-qa.md |
 
-Open the feedback file. If there are critical issues, you paste the feedback into a new Architect Composer to scope fixes. If it's clean, you move to the next phase.
+## Review Status
+| Review | Status | File |
+|--------|--------|------|
+| QA | DONE | qa/phase-1-qa.md |
+| Gap Analysis | DONE | reviews/gap-phase-1.md |
+| Persona Review | DONE | reviews/persona-phase-1.md |
+| Security Audit | IN_PROGRESS | — |
+
+## Mason Approval Queue
+| Item | Status | Notes |
+|------|--------|-------|
+| Deploy Phase 1 to production | WAITING | All reviews must pass first |
+| Idea #3: Streak tracker | APPROVED - LATER | From reviews/ideas-2026-03-15.md |
+```
+
+Every agent's first action is: **Read TRACKER.md. Find your task. Update status to IN_PROGRESS. When done, update to DONE.**
+
+This means you (Mason) can check the project state by opening one file instead of digging through 15 directories.
+
+### Self-Contained Task Specs
+
+**Problem**: PLAN.md is 1,279 lines. AGENTS.md is 800+. Asking every agent to read both wastes context.
+
+**Solution**: The Architect's task specs are **self-contained**. Each spec includes only the context that specific Coder/QA agent needs — excerpted from PLAN.md, not the whole thing.
+
+A task spec looks like this:
+
+```markdown
+# Task T1.3: Obtain SSL Certificate
+**Phase**: 1 — Server Infrastructure
+**Dependencies**: T1.1 (nginx installed) must be DONE
+**Files to modify**: /etc/nginx/sites-available/chadbacktesting.com (on server via SSH)
+**Files to read for context**: None (all context below)
+
+## Context (excerpted from PLAN.md)
+- Server: 95.216.5.147, SSH as root, key at ~/.ssh/hetzner_server_key
+- Domain: chadbacktesting.com (A record) + www.chadbacktesting.com (A record)
+- Certbot should cover both domains in one cert
+
+## What to Do
+1. SSH into the server
+2. Run: certbot --nginx -d chadbacktesting.com -d www.chadbacktesting.com
+3. Verify cert was obtained: certbot certificates
+4. Verify auto-renewal timer: systemctl status certbot.timer
+
+## Acceptance Criteria
+- [ ] SSL cert exists for chadbacktesting.com
+- [ ] SSL cert also covers www.chadbacktesting.com
+- [ ] certbot.timer is active
+- [ ] https://chadbacktesting.com loads (may show nginx default page, that's OK)
+
+## When Done
+Update TRACKER.md: set T1.3 status to DONE.
+Write a brief note to status/T1.3-status.md confirming what was done.
+```
+
+The Coder agent reads **only this file**. No need to parse 1,279 lines of PLAN.md. Everything they need is right here.
 
 ### How File Conflicts Are Prevented
 
-The entire system is designed so parallel agents never touch the same file:
+The Architect assigns each parallel task a non-overlapping set of files:
 
 | Agent | Writes To | Never Touches |
 |-------|-----------|---------------|
-| Architect | `tasks/phase-N/*.md` | Source code, status, qa, reviews |
-| Coder A | Specific source files + `status/T-A.md` | Files assigned to Coder B |
-| Coder B | Different source files + `status/T-B.md` | Files assigned to Coder A |
-| QA | `qa/*.md` | Source code, tasks |
-| Gap Analyst | `reviews/gap-*.md` | Source code, other review files |
-| Persona Agent | `reviews/persona-*.md` | Source code, other review files |
-| Security Reviewer | `reviews/security-*.md` | Source code, other review files |
+| Architect | `tasks/phase-N/*.md`, `TRACKER.md` | Source code |
+| Coder A | Its assigned source files + `status/T-A.md` + TRACKER.md (own row only) | Files assigned to Coder B |
+| Coder B | Its assigned source files + `status/T-B.md` + TRACKER.md (own row only) | Files assigned to Coder A |
+| QA | `qa/*.md` + TRACKER.md (review status section) | Source code |
+| Gap Analyst | `reviews/gap-*.md` | Other review files |
+| Persona Agent | `reviews/persona-*.md` | Other review files |
+| Security Reviewer | `reviews/security-*.md` | Other review files |
 
-**If two agents need to modify the same file** (e.g., two tasks both touch `mbo_streaming_server.py`), they CANNOT run in parallel. The Architect must put them in sequential groups.
+**Hard rule**: If two tasks both modify `mbo_streaming_server.py`, they are in sequential groups. Period. The Architect enforces this. If the Architect screws this up, the QA agent will catch the merge conflict.
 
 ### What You (Mason) Actually Do
 
-Your role in the loop:
+```
+1. Open one Composer tab: "You are the Orchestrator. Read TRACKER.md. What needs to happen next?"
+2. The orchestrator tells you: "Phase 1, T1.1-T1.3 are ready. Shall I start?"
+3. You say: "Go"
+4. It runs sub-agents or tells you to open separate Composers for large tasks
+5. You check TRACKER.md periodically to see progress
+6. At approval checkpoints, the orchestrator asks: "Phase 1 complete. Reviews passed. Deploy?"
+7. You say: "Deploy" or "Fix the WebSocket issue first"
+```
 
-1. **Start each step** by opening Composer tabs with the right prompts
-2. **Glance at outputs** as they complete — you don't need to read every line, but skim the QA and review summaries
-3. **Make go/no-go decisions** — "phase looks good, move on" or "fix these issues first"
-4. **Approve or reject ideas** — Product Ideation Agent writes suggestions, you decide (see approval workflow below)
-5. **Provide blocked info** — when a task says "BLOCKED until Mason provides X" (like Stripe keys), you unblock it
+You are the project manager. You read one status file and say "go" or "fix."
 
-You are NOT doing the coding, testing, or reviewing. You're the project manager reading dashboards and saying "go" or "fix."
+### The Orchestrator Prompt
 
-### Quick-Start Prompt: Running Any Agent
-
-Copy-paste this into a new Composer, replacing the bracketed values:
+This is the master prompt. Open one Composer, paste this, and the system runs:
 
 ```
-Read chadbacktesting/AGENTS.md and chadbacktesting/PLAN.md.
+Read chadbacktesting/TRACKER.md, chadbacktesting/AGENTS.md, and chadbacktesting/PLAN.md.
 
-You are the [AGENT ROLE] for the Chad Backtesting project.
-Current phase: Phase [N].
-[If applicable: Current task: tasks/phase-N/[task-id].md]
-[If applicable: Prior feedback to address: feedback/phase-N-round-[M].md]
+You are the Orchestrator for the Chad Backtesting project. Your job:
 
-Follow your role instructions exactly as defined in AGENTS.md.
-Write your output to the correct directory as specified in your role.
+1. Read TRACKER.md to understand current state
+2. Determine what needs to happen next (next task, next step, next phase)
+3. For small/focused tasks: use the Task tool to spin up sub-agents in parallel
+4. For large tasks: tell Mason to open a separate Composer and give him the exact prompt to paste
+5. After tasks complete, read their output files and update TRACKER.md
+6. When a phase's coding is done, spin up QA + review agents (3 in parallel via Task tool)
+7. Aggregate feedback and update TRACKER.md
+8. At approval checkpoints, stop and ask Mason for go/no-go
+
+RULES:
+- Never run two agents that modify the same file in parallel
+- Always update TRACKER.md after any state change
+- At approval checkpoints (deployment, phase completion, scope changes), STOP and ask Mason
+- If a task is BLOCKED, skip it and work on unblocked tasks
+- If you hit something you can't resolve, ask Mason
 ```
 
 ---
@@ -714,68 +796,71 @@ QA agents additionally read:
 
 ### How to Execute a Phase
 
-This is the step-by-step playbook for running agents through any phase.
+#### The Short Version
 
-#### Step 0: Pre-flight Check
+1. Open one Composer. Paste the **Orchestrator Prompt** (see above).
+2. Say: "Begin Phase [N]"
+3. Orchestrator reads TRACKER.md, spins up Architect, then Coders, then QA, then reviewers.
+4. At checkpoints it asks you: "Deploy?" / "Proceed?" / "Fix X?"
+5. You answer. It continues.
+
+#### The Detailed Version
+
+**Step 0 — Pre-flight** (Orchestrator does this automatically):
+- Reads TRACKER.md to confirm current phase and round
+- Checks if previous phase is marked complete
+- Checks for unresolved feedback from prior rounds
+
+**Step 1 — Architect** (Orchestrator runs this):
+- Spins up Architect as a sub-agent (or does it inline if context allows)
+- Architect reads the phase's task list from PLAN.md
+- Writes self-contained task specs to `tasks/phase-N/`
+- Each spec includes only the context the Coder needs (excerpted, not the full plan)
+- Identifies parallel groups and marks them in TRACKER.md
+- Orchestrator verifies specs were written, updates TRACKER.md
+
+**Step 2 — Coding** (Orchestrator coordinates):
+- For small tasks: Orchestrator spawns Coder sub-agents via Task tool (up to 4 in parallel)
+- For large tasks: Orchestrator tells Mason "Open a new Composer, paste this prompt: [...]"
+- Each Coder reads only its task spec file (self-contained, ~50 lines, not the whole plan)
+- Each Coder updates TRACKER.md when done (its row only)
+- Orchestrator monitors progress by re-reading TRACKER.md
+- When a parallel group finishes, Orchestrator starts the next group
+
+**Step 3 — QA** (Orchestrator spawns QA sub-agents):
+- For each completed task, QA tests against the acceptance criteria in the task spec
+- Writes pass/fail reports to `qa/`
+- Updates TRACKER.md
+- If QA fails a task → status goes to NEEDS_FIX, Orchestrator re-assigns to Coder
+
+**Step 4 — Reviews** (Orchestrator spawns 3 in parallel):
+- Gap Analyst, User Persona, Security Reviewer all run simultaneously
+- Each reads the code and QA reports, writes to `reviews/`
+- Orchestrator waits for all three to complete
+
+**Step 5 — Feedback** (Orchestrator does this inline):
+- Reads all QA reports + all three reviews
+- Writes consolidated `feedback/phase-N-round-M.md`
+- If critical/major issues → sets tasks to NEEDS_FIX, loops back to Step 2
+- If clean → asks Mason: "Phase N complete. All reviews passed. Proceed to Phase N+1?"
+
+**Step 6 — Mason checkpoint**:
+- Mason says "proceed" or "fix X" or "deploy"
+- Orchestrator updates TRACKER.md and continues
+
+### How the QA → Fix Loop Works
+
 ```
-Read PLAN.md → confirm the phase's task list
-Read feedback/ → check if there's unresolved feedback from a prior round
-Verify prerequisites: previous phase is marked complete
+Coder finishes T1.3 → QA tests T1.3 → FAILS (WebSocket not proxied)
+    → QA writes qa/T1.3-qa.md with failure details
+    → TRACKER.md: T1.3 = NEEDS_FIX
+    → Orchestrator reads the QA report
+    → Orchestrator spawns Coder sub-agent: "Read qa/T1.3-qa.md. Fix the issue."
+    → Coder fixes → QA retests → PASSES
+    → TRACKER.md: T1.3 = DONE
 ```
 
-#### Step 1: Spin Up Architect Agent
-```
-Input: PLAN.md (phase task list) + any feedback from prior rounds
-Output: Task specs in tasks/[phase]/
-Parallelizable: NO (must complete before Coders start)
-```
-
-#### Step 2: Spin Up Coder Agent(s) — PARALLEL
-```
-For each task spec where dependencies are met:
-    Spin up a Coder Agent with that task spec
-    Coder implements and writes to status/
-
-Parallel groups (example for Phase 1):
-    Group A (no deps): T1.1, T1.6, T1.7 (can run simultaneously)
-    Group B (needs Group A): T1.2, T1.3 (need nginx installed first)
-    Group C (needs Group B): T1.4, T1.5, T1.8-T1.15 (need SSL + nginx configured)
-```
-
-#### Step 3: Spin Up QA Agent — After Each Coder Completes
-```
-For each completed task:
-    QA Agent tests against acceptance criteria
-    Writes report to qa/
-
-Can run in parallel for independent tasks.
-```
-
-#### Step 4: Spin Up Review Agents — PARALLEL (after all QA completes)
-```
-All three run simultaneously:
-    Gap Analyst Agent → reviews/gap-[phase].md
-    User Persona Agent → reviews/persona-[phase].md
-    Security Reviewer Agent → reviews/security-[phase].md
-```
-
-#### Step 5: Feedback Aggregation
-```
-Read all QA reports + all review documents
-Write consolidated feedback to feedback/[phase]-round-[N].md
-Decision: PASS (proceed) or LOOP (fix issues)
-```
-
-#### Step 6: Loop or Proceed
-```
-IF LOOP:
-    Architect reads feedback → produces fix task specs → Coder fixes → QA retests
-    (Only the failed/flagged items, not the whole phase)
-
-IF PASS:
-    Mark phase complete
-    Begin next phase
-```
+This inner loop runs automatically. Mason only gets involved at phase-level checkpoints, not individual task fixes.
 
 ---
 
