@@ -20,7 +20,107 @@
 
 The existing Arkon backtesting system (currently at `http://95.216.5.147:8000/`) is a private, personal tool. It will continue to function exactly as-is but will be moved to a private route (`/pvt`). The root URL will become the public-facing Chad Backtesting SaaS product.
 
-**Critical constraint:** The existing Hetzner server, database (`strategies.db`), cached market data, and all deployed code must NOT be disrupted. The private backtesting system must continue working throughout development.
+**Critical constraints:**
+- The existing Hetzner server, database (`strategies.db`), cached market data, and all deployed code must NOT be disrupted. The private backtesting system must continue working throughout development.
+- **All Arkon chart code stays in `arkon/` only.** The `chadbacktesting/` repo contains ONLY the SaaS product code (landing page, auth, billing, dashboard, etc.). The backtesting chart is never copied or duplicated - it is served directly from `arkon/` assets on the server.
+- **Domain**: `chadbacktesting.com` (DNS already configured, A records pointing to Hetzner server)
+- **Payments**: Stripe (confirmed)
+
+---
+
+## Domain & DNS
+
+### Current DNS Configuration
+
+| Record Type | Host | Value | Notes |
+|-------------|------|-------|-------|
+| A | `@` | `95.216.5.147` | Root domain → Hetzner server |
+| A | `www` | `95.216.5.147` | www subdomain → Hetzner server |
+
+### Required Server Configuration
+
+An **nginx reverse proxy** is needed on the Hetzner server to handle:
+
+1. **SSL termination** via Let's Encrypt (certbot) for `chadbacktesting.com`
+2. **301 redirect**: `www.chadbacktesting.com` → `chadbacktesting.com` (canonical non-www)
+3. **Proxy pass** to uvicorn on `127.0.0.1:8000`
+4. **HTTP → HTTPS redirect** on port 80
+
+#### Target nginx config (conceptual)
+
+```nginx
+# Redirect www → non-www (301)
+server {
+    listen 80;
+    listen 443 ssl;
+    server_name www.chadbacktesting.com;
+
+    ssl_certificate /etc/letsencrypt/live/chadbacktesting.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/chadbacktesting.com/privkey.pem;
+
+    return 301 https://chadbacktesting.com$request_uri;
+}
+
+# HTTP → HTTPS redirect
+server {
+    listen 80;
+    server_name chadbacktesting.com;
+    return 301 https://chadbacktesting.com$request_uri;
+}
+
+# Main server block
+server {
+    listen 443 ssl;
+    server_name chadbacktesting.com;
+
+    ssl_certificate /etc/letsencrypt/live/chadbacktesting.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/chadbacktesting.com/privkey.pem;
+
+    # Proxy everything to uvicorn
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # WebSocket support
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 86400;
+    }
+}
+```
+
+#### Setup commands (on server)
+```bash
+# Install nginx
+apt update && apt install -y nginx
+
+# Install certbot for Let's Encrypt
+apt install -y certbot python3-certbot-nginx
+
+# Get SSL certificate (covers both www and non-www)
+certbot --nginx -d chadbacktesting.com -d www.chadbacktesting.com
+
+# Auto-renewal is set up automatically by certbot
+# Verify: systemctl status certbot.timer
+```
+
+#### Important: Existing direct IP access
+
+After nginx is set up, the uvicorn server should bind to `127.0.0.1:8000` (localhost only) instead of `0.0.0.0:8000`. This means:
+- `https://chadbacktesting.com/` → nginx → uvicorn (public access)
+- `https://chadbacktesting.com/pvt` → nginx → uvicorn (private backtesting)
+- `http://95.216.5.147:8000/` → would stop working (intentional, everything goes through nginx now)
+
+If direct IP access is still needed during transition, keep `0.0.0.0:8000` temporarily and update `start_server_background.sh` later.
 
 ---
 
@@ -435,77 +535,102 @@ Move the personal backtesting tool from `/` to `/pvt` so the root URL can serve 
 
 ### Vision
 
-A public-facing SaaS product at `http://95.216.5.147:8000/` (and eventually a custom domain) that lets traders sign up, pay, and use the Arkon backtesting tool. Branding is **GigaChad** meme-inspired - serious product, hilarious personality.
+A public-facing SaaS product at `https://chadbacktesting.com` that lets traders sign up, pay, and use the backtesting tool. Branding is **GigaChad** meme-inspired - serious product, hilarious personality.
 
-### Architecture Decision Points
+### Architecture (Confirmed Decisions)
 
-These need to be decided before implementation:
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| **Hosting** | Everything on Hetzner server, nginx reverse proxy | Single server simplicity, domain already pointed here |
+| **Domain** | `chadbacktesting.com` | DNS already configured (A records → 95.216.5.147) |
+| **SSL** | Let's Encrypt via certbot + nginx | Free, automatic renewal |
+| **Payments** | Stripe | Industry standard, confirmed |
+| **www redirect** | 301 `www.chadbacktesting.com` → `chadbacktesting.com` | Canonical non-www |
 
-1. **Hosting approach**: 
-   - Option A: Everything on the same Hetzner server (port 8000) - simpler, add routes to existing FastAPI
-   - Option B: Separate frontend deployment (Vercel/Netlify) + Hetzner stays as API-only - more scalable
-   - Option C: New service on same server at a different port, reverse proxy with nginx
+### Architecture Decision Points (Still Open)
 
-2. **Frontend framework**: 
-   - Option A: Next.js / React (standard SaaS choice)
-   - Option B: Plain HTML/CSS/JS (consistent with arkon.html approach)
-   - Option C: Astro (good for marketing + app hybrid)
+1. **Frontend framework**: 
+   - Option A: Next.js / React (standard SaaS choice, needs Node.js on server or separate build)
+   - Option B: Plain HTML/CSS/JS (consistent with arkon.html, simplest to deploy)
+   - Option C: Astro (good for marketing + app hybrid, static output)
 
-3. **Auth system**:
+2. **Auth system**:
    - Option A: Clerk / Auth0 (managed, fast to implement)
-   - Option B: Custom auth with JWT + SQLite
+   - Option B: Custom auth with JWT + existing SQLite
    - Option C: Supabase Auth
 
-4. **Payments**:
-   - Stripe (standard choice)
-   - Pricing tiers TBD
-
-5. **Multi-tenancy**:
+3. **Multi-tenancy**:
    - Currently the `owner` field in the DB separates users
    - Need to add proper authentication to protect user data
    - Each user should only see their own strategies/trades
 
+### Code Separation Rule
+
+**The `chadbacktesting/` repo does NOT contain any Arkon chart code.** It only contains:
+- SaaS marketing / landing pages
+- Auth pages (login, signup, forgot password)
+- Dashboard pages
+- Billing / account management pages
+- Deployment scripts for the SaaS layer
+- nginx configuration templates
+- Any SaaS-specific API code (user accounts, billing webhooks, etc.)
+
+The backtesting chart (`arkon.html`) stays in `arkon/` and is served directly by the existing FastAPI server. The SaaS layer gates access to it via auth but never duplicates it.
+
 ### Proposed SaaS Components
 
-#### Landing Page
+#### Landing Page (`/`)
 - GigaChad themed hero section
-- Feature highlights (the backtesting tool screenshots)
-- Pricing section
+- Feature highlights (backtesting tool screenshots)
+- Pricing section with Stripe checkout
 - Sign up / Login CTAs
-- Testimonials section (can be tongue-in-cheek GigaChad themed)
+- Testimonials section (tongue-in-cheek GigaChad themed)
 
-#### Auth System
+#### Auth System (`/login`, `/signup`, `/forgot-password`)
 - Sign up / Login pages
 - Email verification
 - Password reset
-- Session management
+- Session management (JWT or session cookies)
 
-#### Dashboard
+#### Dashboard (`/dashboard`)
 - User's strategies list
 - Performance metrics / stats
-- Quick-launch backtesting
+- Quick-launch backtesting button
 
-#### Backtesting Tool
-- This IS `arkon.html` - embedded or served for authenticated users
-- Needs to be gated behind auth
-- User's `owner` field tied to their account
+#### Backtesting Tool (`/app` or `/backtest`)
+- This IS `arkon.html` - served for authenticated, subscribed users
+- Gated behind auth + active Stripe subscription check
+- User's `owner` field tied to their account ID
+- Served by the existing FastAPI server at a protected route
 
-#### Account / Settings
+#### Account / Settings (`/account`, `/billing`)
 - Profile management
-- Subscription management
-- Billing portal (Stripe)
+- Subscription management via Stripe Customer Portal
+- Billing history
 
-#### Admin Panel (internal)
+#### Admin Panel (`/admin` - internal only)
 - User management
 - Subscription stats
 - Usage metrics
 
+### Stripe Integration Details
+
+- **Stripe Checkout**: For initial subscription signup
+- **Stripe Customer Portal**: For subscription management (cancel, upgrade, payment method)
+- **Stripe Webhooks**: `/api/stripe/webhook` endpoint to handle:
+  - `checkout.session.completed` - activate subscription
+  - `customer.subscription.updated` - plan changes
+  - `customer.subscription.deleted` - cancellation
+  - `invoice.payment_failed` - handle failed payments
+- **Pricing tiers**: TBD (e.g., Free trial → Pro monthly → Pro annual)
+
 ### Branding Notes
 
-- **Name**: Chad Backtesting (or "ChadTest", "GigaBacktest", etc.)
+- **Name**: Chad Backtesting
+- **Domain**: `chadbacktesting.com`
 - **Personality**: Confident, funny, meme-forward. "Stop being a virgin trader. Backtest like a Chad."
 - **Visual style**: Clean modern SaaS design with GigaChad meme imagery as accents
-- **Color palette**: Dark mode primary (consistent with Arkon's dark charts), with bold accent colors
+- **Color palette**: Dark mode primary (consistent with the dark charts), with bold accent colors
 - **Tone**: Serious about the product, hilarious in copy. "Your P&L is crying. Fix it."
 
 ---
@@ -515,57 +640,78 @@ These need to be decided before implementation:
 ### Phase 0: Foundation (Do First)
 
 - [x] **T0.1** - Create chadbacktesting repo and push to GitHub
-- [ ] **T0.2** - Decide on architecture (hosting, frontend framework, auth, payments)
-- [ ] **T0.3** - Set up project scaffold in `chadbacktesting/` based on architecture decisions
+- [x] **T0.2** - Document full system architecture and context for agents (this file)
+- [ ] **T0.3** - Decide on frontend framework and auth provider
+- [ ] **T0.4** - Set up project scaffold in `chadbacktesting/` based on architecture decisions
 
-### Phase 1: Private Route Migration (Initiative 1)
+### Phase 1: Server Infrastructure (nginx, SSL, Domain)
 
-- [ ] **T1.1** - Add `/pvt` route to `mbo_streaming_server.py` that serves `arkon.html`
-- [ ] **T1.2** - Verify `arkon.html` works correctly when served from `/pvt` (API calls, WebSocket, screenshots, all features)
-- [ ] **T1.3** - Deploy updated `mbo_streaming_server.py` to Hetzner server
-- [ ] **T1.4** - Verify `/pvt` works on production server
-- [ ] **T1.5** - Update deployment scripts to reference `/pvt` as the private URL
-- [ ] **T1.6** - Keep `/` also serving arkon.html during transition (don't break anything)
+- [ ] **T1.1** - Install nginx on Hetzner server
+- [ ] **T1.2** - Configure nginx as reverse proxy to uvicorn on port 8000
+- [ ] **T1.3** - Install certbot and obtain Let's Encrypt SSL cert for `chadbacktesting.com` + `www.chadbacktesting.com`
+- [ ] **T1.4** - Configure nginx 301 redirect: `www.chadbacktesting.com` → `chadbacktesting.com`
+- [ ] **T1.5** - Configure nginx HTTP → HTTPS redirect on port 80
+- [ ] **T1.6** - Configure nginx WebSocket proxy for `/ws/` paths
+- [ ] **T1.7** - Test: `https://chadbacktesting.com/` serves the app correctly (temporarily still arkon.html)
+- [ ] **T1.8** - Test: `https://www.chadbacktesting.com/` 301 redirects to `https://chadbacktesting.com/`
+- [ ] **T1.9** - Test: WebSocket connections work through nginx (`wss://chadbacktesting.com/ws/...`)
+- [ ] **T1.10** - Update `arkon.html` `computeBaseUrls()` to handle HTTPS origin / `chadbacktesting.com` domain correctly
+- [ ] **T1.11** - Decide: lock down direct IP:8000 access or keep as fallback during dev
 
-### Phase 2: SaaS Landing Page (Initiative 2 - Start)
+### Phase 2: Private Route Migration (Initiative 1)
 
-- [ ] **T2.1** - Design landing page wireframe/mockup
-- [ ] **T2.2** - Source GigaChad assets and create brand kit (logo, colors, fonts)
-- [ ] **T2.3** - Build landing page with hero, features, pricing, CTA sections
-- [ ] **T2.4** - Set up the landing page to be served at `/` on the Hetzner server
-- [ ] **T2.5** - Add email collection / waitlist functionality
+- [ ] **T2.1** - Add `/pvt` route to `mbo_streaming_server.py` that serves `arkon.html`
+- [ ] **T2.2** - Verify `arkon.html` works correctly when served from `/pvt` (API calls, WebSocket, screenshots, all features)
+- [ ] **T2.3** - Deploy updated `mbo_streaming_server.py` to Hetzner server
+- [ ] **T2.4** - Verify `https://chadbacktesting.com/pvt` works on production
+- [ ] **T2.5** - Update deployment scripts to reference `/pvt` as the private URL
+- [ ] **T2.6** - Keep `/` also serving arkon.html during transition (don't break anything)
 
-### Phase 3: Authentication
+### Phase 3: SaaS Landing Page (Initiative 2 - Start)
 
-- [ ] **T3.1** - Choose and set up auth provider (Clerk / Auth0 / custom)
-- [ ] **T3.2** - Build sign up / login pages
-- [ ] **T3.3** - Add auth middleware to protect `/api/*` endpoints
-- [ ] **T3.4** - Map authenticated user to `owner` field in database
-- [ ] **T3.5** - Gate access to the backtesting tool behind auth
+- [ ] **T3.1** - Source GigaChad assets and create brand kit (logo, colors, fonts)
+- [ ] **T3.2** - Build landing page with hero, features, pricing, CTA sections
+- [ ] **T3.3** - Deploy landing page to be served at `/` on the Hetzner server (replaces arkon.html at root)
+- [ ] **T3.4** - Add email collection / waitlist functionality
+- [ ] **T3.5** - Verify `/pvt` still works after root changes
 
-### Phase 4: Payments
+### Phase 4: Authentication
 
-- [ ] **T4.1** - Set up Stripe account and API keys
-- [ ] **T4.2** - Define pricing tiers (free trial, monthly, annual)
-- [ ] **T4.3** - Implement Stripe Checkout / subscription management
-- [ ] **T4.4** - Build billing portal / account management page
-- [ ] **T4.5** - Add subscription checks to backtesting tool access
+- [ ] **T4.1** - Choose and set up auth provider (Clerk / Auth0 / custom JWT)
+- [ ] **T4.2** - Build sign up / login / forgot-password pages
+- [ ] **T4.3** - Add auth middleware to protect backtesting API endpoints
+- [ ] **T4.4** - Map authenticated user to `owner` field in database
+- [ ] **T4.5** - Gate access to the backtesting tool (`/app` or `/backtest`) behind auth
+- [ ] **T4.6** - Ensure `/pvt` route bypasses SaaS auth (Mason's private access)
 
-### Phase 5: Multi-tenant Backtesting
+### Phase 5: Stripe Payments
 
-- [ ] **T5.1** - Ensure each user's data is properly isolated (strategies, trades, settings)
-- [ ] **T5.2** - Add per-user data storage limits
-- [ ] **T5.3** - Implement user-specific screenshot storage
-- [ ] **T5.4** - Add admin dashboard for user/subscription management
+- [ ] **T5.1** - Set up Stripe account, get API keys (test + live)
+- [ ] **T5.2** - Define pricing tiers (free trial duration, Pro monthly, Pro annual)
+- [ ] **T5.3** - Create Stripe Products and Prices in dashboard
+- [ ] **T5.4** - Implement Stripe Checkout flow (signup → payment → access)
+- [ ] **T5.5** - Implement `/api/stripe/webhook` endpoint for subscription events
+- [ ] **T5.6** - Set up Stripe Customer Portal for self-service subscription management
+- [ ] **T5.7** - Add subscription status checks before serving backtesting tool
+- [ ] **T5.8** - Build `/billing` page with plan info, upgrade/downgrade, cancel
+- [ ] **T5.9** - Test full flow: signup → pay → access tool → cancel → lose access
 
-### Phase 6: Polish & Launch
+### Phase 6: Multi-tenant Backtesting
 
-- [ ] **T6.1** - Custom domain setup (DNS, SSL)
-- [ ] **T6.2** - SEO optimization
-- [ ] **T6.3** - Performance testing / load testing
-- [ ] **T6.4** - Error monitoring (Sentry or similar)
-- [ ] **T6.5** - Analytics (Mixpanel / PostHog / Google Analytics)
-- [ ] **T6.6** - Public launch
+- [ ] **T6.1** - Ensure each user's data is properly isolated (strategies, trades, settings)
+- [ ] **T6.2** - Add per-user data storage limits
+- [ ] **T6.3** - Implement user-specific screenshot storage paths
+- [ ] **T6.4** - Build `/dashboard` with user's strategies and performance stats
+- [ ] **T6.5** - Build `/admin` panel for user/subscription management (internal)
+
+### Phase 7: Polish & Launch
+
+- [ ] **T7.1** - SEO optimization (meta tags, sitemap, robots.txt)
+- [ ] **T7.2** - Performance testing / load testing
+- [ ] **T7.3** - Error monitoring (Sentry or similar)
+- [ ] **T7.4** - Analytics (Mixpanel / PostHog / Google Analytics)
+- [ ] **T7.5** - Legal pages (Terms of Service, Privacy Policy)
+- [ ] **T7.6** - Public launch
 
 ---
 
@@ -607,17 +753,31 @@ cd c:\Users\mason\Documents\arkon
 .\deploy_mbo_server.bat
 ```
 
-### URLs
+### URLs (After Full Setup)
+
 | URL | What |
 |-----|------|
-| `http://95.216.5.147:8000/` | Current: Arkon backtesting. Future: Chad Backtesting landing page |
-| `http://95.216.5.147:8000/pvt` | Future: Private Arkon backtesting (after Initiative 1) |
-| `http://95.216.5.147:8000/docs` | FastAPI auto-generated API documentation |
-| `http://95.216.5.147:8000/health` | Health check endpoint |
+| `https://chadbacktesting.com/` | Chad Backtesting SaaS landing page |
+| `https://chadbacktesting.com/pvt` | Mason's private Arkon backtesting (no auth) |
+| `https://chadbacktesting.com/app` | Authenticated user backtesting tool (arkon.html gated by auth+subscription) |
+| `https://chadbacktesting.com/login` | Login page |
+| `https://chadbacktesting.com/signup` | Signup page |
+| `https://chadbacktesting.com/dashboard` | User dashboard |
+| `https://chadbacktesting.com/billing` | Subscription management |
+| `https://chadbacktesting.com/docs` | FastAPI auto-generated API docs |
+| `https://chadbacktesting.com/health` | Health check endpoint |
+| `https://www.chadbacktesting.com/*` | 301 redirects to `https://chadbacktesting.com/*` |
+| `http://95.216.5.147:8000/` | Direct IP access (may be locked down after nginx setup) |
 
 ---
 
 ## Files That Agents Will Need to Modify
+
+### Infrastructure (nginx, SSL, Domain)
+1. Server: Install nginx, certbot - commands run via SSH
+2. Server: Create `/etc/nginx/sites-available/chadbacktesting.com` config
+3. Server: Symlink to `/etc/nginx/sites-enabled/`
+4. `arkon/start_server_background.sh` - Potentially change `0.0.0.0` → `127.0.0.1` after nginx is set up
 
 ### Initiative 1 (Private Route)
 1. `arkon/mbo_streaming_server.py` - Add `/pvt` route (~line 1334)
@@ -627,7 +787,28 @@ cd c:\Users\mason\Documents\arkon
 5. `arkon/deploy_mbo_server.sh` - Update URL references
 
 ### Initiative 2 (SaaS Product)
-1. `chadbacktesting/` - Entire new SaaS codebase
-2. `arkon/mbo_streaming_server.py` - Add SaaS routes, auth middleware, landing page serving
-3. `arkon/arkon.html` - Potentially add auth token handling for API calls
-4. Server config - Potentially nginx for reverse proxy, SSL certs, etc.
+1. `chadbacktesting/` - SaaS-only code (landing page, auth pages, dashboard, billing pages, deployment scripts)
+2. `arkon/mbo_streaming_server.py` - Add SaaS routes (landing page serving, auth middleware, Stripe webhook endpoint, user management API)
+3. `arkon/arkon.html` - Potentially add auth token handling for API calls when served to SaaS users
+4. Server: nginx config for domain routing, SSL, www redirect
+
+### What `chadbacktesting/` Repo Contains (and Does NOT Contain)
+
+**Contains:**
+- Landing page HTML/CSS/JS (or framework-based pages)
+- Auth page templates (login, signup, forgot-password)
+- Dashboard page templates
+- Billing/account page templates
+- GigaChad brand assets (images, logo, fonts)
+- nginx config templates
+- SaaS deployment scripts
+- Stripe integration code (if separate from main server)
+- This planning document (PLAN.md)
+
+**Does NOT contain:**
+- `arkon.html` (stays in `arkon/`)
+- `mbo_streaming_server.py` (stays in `arkon/`)
+- NightVision charting library (stays in `arkon/static/nightvision-local/`)
+- Market data, parquet files, cache (stays in `arkon/`)
+- `strategies.db` or any database files
+- Any data processing scripts
