@@ -23,40 +23,40 @@
 
 ## How This Works in Cursor (Practical Guide)
 
-### Two Execution Models
+### Hybrid Execution: Cloud Agents + Local Composer
 
-There are two ways to run this system. Use whichever fits the situation.
+This project uses **two types** of Cursor agents depending on what the task touches:
 
-#### Model 1: Orchestrator Agent (Recommended for Most Steps)
+| Type | What It Is | When to Use |
+|------|-----------|-------------|
+| **Cloud Agent** | Runs on Cursor's cloud VMs. Clones the `chadbacktesting` GitHub repo, works on its own branch, pushes changes, creates PRs. Has its own VM to build/test/run code. Can be kicked off from phone, web, Slack, or GitHub. | Any task that only touches files in the `chadbacktesting/` repo (SaaS pages, configs, reviews, task specs) |
+| **Local Composer** | Runs in your Cursor desktop IDE. Has direct access to your local filesystem and SSH keys. | Any task that touches `arkon/` files, or that needs to SSH into the Hetzner server |
 
-You open **one** Composer chat. That agent acts as the orchestrator — it reads the tracker, figures out what needs to happen next, and uses Cursor's **Task tool** to spin up sub-agents for parallel work. The sub-agents do the actual coding/testing/reviewing and write their outputs to files. The orchestrator checks the results and decides what's next.
+#### Why the split?
 
-**Your involvement**: You talk to ONE agent. It does the coordination. You approve checkpoints when asked.
+- Cloud agents only see the `chadbacktesting` GitHub repo. They **cannot** access `arkon/mbo_streaming_server.py`, `arkon/arkon.html`, or your SSH keys.
+- Local Composers have access to everything on your machine — both repos and SSH.
+- Cloud agents can run **unlimited in parallel** with zero machine resource cost.
+- Local Composers share your machine's resources (stick to 2-3 max).
 
-**Limitation**: Sub-agents from the Task tool have smaller context windows than a full Composer. They're good for focused tasks (write a specific function, test a specific endpoint, review a specific file) but not for massive multi-file refactors.
+#### What runs where, by phase
 
-#### Model 2: Manual Parallel Composers (For Large Coding Tasks)
-
-For tasks that need a full context window (e.g., "rewrite the auth middleware across 3 files" or "build the entire landing page"), you open separate Composer tabs yourself. Each tab is a Coder Agent working on a non-overlapping set of files.
-
-**Your involvement**: You open the tabs, paste the prompts, and check when they're done.
-
-#### When to Use Which
-
-| Situation | Model |
-|-----------|-------|
-| Architect breaking a phase into specs | Model 1 (orchestrator) |
-| Small, focused coding tasks (add a route, create a config file) | Model 1 (orchestrator spawns sub-agents) |
-| Large coding tasks (build landing page, implement full OAuth flow) | Model 2 (separate Composer per task) |
-| QA testing | Model 1 (orchestrator spawns QA sub-agents) |
-| All three review agents (Gap, Persona, Security) | Model 1 (orchestrator spawns all three in parallel) |
-| Feedback aggregation | Model 1 (orchestrator reads reviews and summarizes) |
+| Phase | Cloud Agents | Local Composer |
+|-------|-------------|----------------|
+| **Phase 1** (nginx/SSL) | Write nginx config templates, .gitignore | SSH into server to install/configure nginx, certbot, deploy configs |
+| **Phase 2** (private route) | — | Modify `arkon/mbo_streaming_server.py`, deploy via SSH |
+| **Phase 3** (landing page) | Build entire landing page, all HTML/CSS/JS, brand assets | — |
+| **Phase 4** (auth) | Build auth page templates, dashboard pages | Modify `arkon/mbo_streaming_server.py` (add OAuth routes, middleware) |
+| **Phase 5** (Stripe) | Build billing pages, Stripe frontend integration | Modify `arkon/mbo_streaming_server.py` (add webhook endpoint) |
+| **Phase 6** (multi-tenant) | Build dashboard, admin panel pages | Modify `arkon/mbo_streaming_server.py` (data isolation middleware) |
+| **Phase 7** (polish) | SEO, error pages, legal pages, analytics | Deploy scripts, server config |
+| **All reviews** (QA, Gap, Persona, Security) | All run as cloud agents — read-only analysis, can run many in parallel | — |
 
 ### The State Tracker: `TRACKER.md`
 
-This is the single source of truth for what's done, what's in progress, and what's blocked. Every agent reads it before starting. Every agent updates it when they finish.
+Single source of truth for project state. Lives in the `chadbacktesting` GitHub repo so both cloud and local agents can read it.
 
-**Location**: `chadbacktesting/TRACKER.md`
+**Every agent's first action**: Read TRACKER.md. Find your task. Update status.
 
 **Format**:
 ```markdown
@@ -67,126 +67,159 @@ Current round: [M]
 
 ## Phase [N]: [Name]
 
-| Task | Status | Assignee | Files | Blocker | Notes |
-|------|--------|----------|-------|---------|-------|
-| T1.1 | DONE | Coder | /etc/nginx/... | — | Completed round 1 |
-| T1.2 | IN_PROGRESS | Coder-B | ssl certs | — | Running now |
-| T1.3 | BLOCKED | — | — | Needs T1.1 done | Dep on nginx install |
-| T1.4 | TODO | — | — | — | Not started |
-| T1.5 | NEEDS_FIX | Coder | start_server.sh | QA failed | See qa/T1.5-qa.md |
-
-## Review Status
-| Review | Status | File |
-|--------|--------|------|
-| QA | DONE | qa/phase-1-qa.md |
-| Gap Analysis | DONE | reviews/gap-phase-1.md |
-| Persona Review | DONE | reviews/persona-phase-1.md |
-| Security Audit | IN_PROGRESS | — |
-
-## Mason Approval Queue
-| Item | Status | Notes |
-|------|--------|-------|
-| Deploy Phase 1 to production | WAITING | All reviews must pass first |
-| Idea #3: Streak tracker | APPROVED - LATER | From reviews/ideas-2026-03-15.md |
+| Task | Status | Where | Files | Blocker | Notes |
+|------|--------|-------|-------|---------|-------|
+| T1.1 | DONE | LOCAL | server: nginx | — | Done round 1 |
+| T1.2 | IN_PROGRESS | LOCAL | server: certbot | T1.1 | Running now |
+| T1.3 | TODO | CLOUD | chadbacktesting/nginx/ | — | Config template |
+| T1.4 | BLOCKED | LOCAL | — | T1.2 | Needs cert first |
 ```
 
-Every agent's first action is: **Read TRACKER.md. Find your task. Update status to IN_PROGRESS. When done, update to DONE.**
-
-This means you (Mason) can check the project state by opening one file instead of digging through 15 directories.
+The `Where` column tells every agent (and you) whether this task runs as a cloud agent or local Composer. No guessing.
 
 ### Self-Contained Task Specs
 
-**Problem**: PLAN.md is 1,279 lines. AGENTS.md is 800+. Asking every agent to read both wastes context.
+Each task spec the Architect writes is self-contained — includes only the context that agent needs, excerpted from PLAN.md, not the whole 1,279-line file.
 
-**Solution**: The Architect's task specs are **self-contained**. Each spec includes only the context that specific Coder/QA agent needs — excerpted from PLAN.md, not the whole thing.
-
-A task spec looks like this:
+A task spec also declares its execution type:
 
 ```markdown
 # Task T1.3: Obtain SSL Certificate
 **Phase**: 1 — Server Infrastructure
+**Execution**: LOCAL (requires SSH to Hetzner server)
 **Dependencies**: T1.1 (nginx installed) must be DONE
 **Files to modify**: /etc/nginx/sites-available/chadbacktesting.com (on server via SSH)
-**Files to read for context**: None (all context below)
 
 ## Context (excerpted from PLAN.md)
 - Server: 95.216.5.147, SSH as root, key at ~/.ssh/hetzner_server_key
-- Domain: chadbacktesting.com (A record) + www.chadbacktesting.com (A record)
+- Domain: chadbacktesting.com + www.chadbacktesting.com
 - Certbot should cover both domains in one cert
 
 ## What to Do
 1. SSH into the server
 2. Run: certbot --nginx -d chadbacktesting.com -d www.chadbacktesting.com
-3. Verify cert was obtained: certbot certificates
-4. Verify auto-renewal timer: systemctl status certbot.timer
+3. Verify cert was obtained
+4. Verify auto-renewal timer
 
 ## Acceptance Criteria
-- [ ] SSL cert exists for chadbacktesting.com
-- [ ] SSL cert also covers www.chadbacktesting.com
+- [ ] SSL cert exists for both domains
 - [ ] certbot.timer is active
-- [ ] https://chadbacktesting.com loads (may show nginx default page, that's OK)
+- [ ] https://chadbacktesting.com loads
 
 ## When Done
 Update TRACKER.md: set T1.3 status to DONE.
-Write a brief note to status/T1.3-status.md confirming what was done.
+Write status/T1.3-status.md confirming what was done.
 ```
 
-The Coder agent reads **only this file**. No need to parse 1,279 lines of PLAN.md. Everything they need is right here.
+```markdown
+# Task T3.2: Build Landing Page Hero Section
+**Phase**: 3 — SaaS Landing Page
+**Execution**: CLOUD (chadbacktesting repo only)
+**Branch**: phase-3/T3.2-hero-section
+**Dependencies**: T3.1 (brand assets) must be DONE
+**Files to create/modify**: chadbacktesting/src/landing/hero.html, hero.css
 
-### How File Conflicts Are Prevented
+## Context
+- GigaChad branding, dark mode, bold accents
+- See PLAN.md "Branding Notes" and AGENTS.md "Target User Persona"
+- Hero must communicate: "Free backtesting. No BS."
 
-The Architect assigns each parallel task a non-overlapping set of files:
+## What to Do
+1. Create hero section with GigaChad imagery
+2. "Sign in with Google" CTA button
+3. One-line value prop that speaks to Jake
+4. Mobile-responsive
 
-| Agent | Writes To | Never Touches |
-|-------|-----------|---------------|
-| Architect | `tasks/phase-N/*.md`, `TRACKER.md` | Source code |
-| Coder A | Its assigned source files + `status/T-A.md` + TRACKER.md (own row only) | Files assigned to Coder B |
-| Coder B | Its assigned source files + `status/T-B.md` + TRACKER.md (own row only) | Files assigned to Coder A |
-| QA | `qa/*.md` + TRACKER.md (review status section) | Source code |
-| Gap Analyst | `reviews/gap-*.md` | Other review files |
-| Persona Agent | `reviews/persona-*.md` | Other review files |
-| Security Reviewer | `reviews/security-*.md` | Other review files |
+## Acceptance Criteria
+- [ ] Hero section renders on desktop and mobile
+- [ ] CTA button is prominent
+- [ ] GigaChad branding is visible and fun
+- [ ] Copy is dead simple, no jargon
 
-**Hard rule**: If two tasks both modify `mbo_streaming_server.py`, they are in sequential groups. Period. The Architect enforces this. If the Architect screws this up, the QA agent will catch the merge conflict.
+## When Done
+Push branch, create PR against main.
+Update TRACKER.md: set T3.2 status to DONE.
+```
+
+### How Merge Conflicts Are Prevented
+
+Cloud agents each work on their **own branch** (e.g., `phase-3/T3.2-hero-section`). The Architect ensures:
+
+1. **No two cloud agents modify the same file** in parallel — different branches changing the same file = merge conflict when merging PRs
+2. **Cloud agents never touch `arkon/` files** — those are local-only
+3. **Local Composers work on `main` directly** (or a single local branch) since they're sequential anyway
+4. **PRs from cloud agents are merged in dependency order** — the Architect's parallel groups define merge order
+
+| Agent Type | Works On | Merges How |
+|------------|----------|------------|
+| Cloud Agent A | Branch `phase-3/T3.2-hero` | PR → merge after review |
+| Cloud Agent B | Branch `phase-3/T3.3-pricing` | PR → merge after review |
+| Cloud Agent C | Branch `phase-3/T3.4-features` | PR → merge after review |
+| Local Composer | `main` (or local branch) | Direct commit or local PR |
 
 ### What You (Mason) Actually Do
 
-```
-1. Open one Composer tab: "You are the Orchestrator. Read TRACKER.md. What needs to happen next?"
-2. The orchestrator tells you: "Phase 1, T1.1-T1.3 are ready. Shall I start?"
-3. You say: "Go"
-4. It runs sub-agents or tells you to open separate Composers for large tasks
-5. You check TRACKER.md periodically to see progress
-6. At approval checkpoints, the orchestrator asks: "Phase 1 complete. Reviews passed. Deploy?"
-7. You say: "Deploy" or "Fix the WebSocket issue first"
-```
+**For phases that are mostly cloud (Phase 3, 5, 6, 7):**
+1. Open `cursor.com/agents` on your phone or browser
+2. Kick off the Architect agent: "Read TRACKER.md and PLAN.md. Produce task specs for Phase 3."
+3. Once specs are written, kick off cloud Coder agents — one per task that can run in parallel
+4. They each work on their own branch, push, and create PRs
+5. Kick off cloud QA and review agents to analyze the PRs
+6. Merge the PRs when reviews pass
+7. Check TRACKER.md for status at any time
 
-You are the project manager. You read one status file and say "go" or "fix."
+**For phases that are mostly local (Phase 1, 2):**
+1. Open a local Composer in Cursor desktop
+2. Paste the Orchestrator prompt (below)
+3. It handles SSH commands, file edits, and deployment to the Hetzner server
+4. You approve deployment checkpoints
 
-### The Orchestrator Prompt
+**You can run cloud and local agents simultaneously.** For example: a local Composer is deploying Phase 1 nginx config to the server while cloud agents are already building Phase 3 landing page code in parallel.
 
-This is the master prompt. Open one Composer, paste this, and the system runs:
+### The Orchestrator Prompt (for local phases)
+
+Use this for phases that need SSH / arkon/ access:
 
 ```
 Read chadbacktesting/TRACKER.md, chadbacktesting/AGENTS.md, and chadbacktesting/PLAN.md.
 
-You are the Orchestrator for the Chad Backtesting project. Your job:
+You are the Orchestrator for the Chad Backtesting project (LOCAL mode).
+You have access to the local filesystem and SSH keys.
 
+Your job:
 1. Read TRACKER.md to understand current state
-2. Determine what needs to happen next (next task, next step, next phase)
-3. For small/focused tasks: use the Task tool to spin up sub-agents in parallel
-4. For large tasks: tell Mason to open a separate Composer and give him the exact prompt to paste
-5. After tasks complete, read their output files and update TRACKER.md
-6. When a phase's coding is done, spin up QA + review agents (3 in parallel via Task tool)
-7. Aggregate feedback and update TRACKER.md
-8. At approval checkpoints, stop and ask Mason for go/no-go
+2. Work through LOCAL tasks for the current phase
+3. For tasks needing SSH: execute commands on the Hetzner server (95.216.5.147)
+4. For tasks modifying arkon/ files: edit them directly
+5. After each task, update TRACKER.md
+6. When the phase's local tasks are done, run QA checks
+7. At approval checkpoints (especially deployment), STOP and ask Mason
 
 RULES:
-- Never run two agents that modify the same file in parallel
+- NEVER wipe or overwrite strategies.db on the server
+- NEVER break the existing backtesting tool at /pvt or /
 - Always update TRACKER.md after any state change
-- At approval checkpoints (deployment, phase completion, scope changes), STOP and ask Mason
-- If a task is BLOCKED, skip it and work on unblocked tasks
-- If you hit something you can't resolve, ask Mason
+- At deployment checkpoints, STOP and ask Mason for go/no-go
+```
+
+### The Cloud Agent Prompt Template
+
+Use this when kicking off cloud agents (from web, Slack, or GitHub):
+
+```
+Read chadbacktesting/TRACKER.md.
+
+You are a [AGENT ROLE] for the Chad Backtesting project.
+Current phase: Phase [N].
+Your task: Read chadbacktesting/tasks/phase-[N]/[task-id].md and execute it.
+
+Work on branch: phase-[N]/[task-id]
+When done: push your branch, create a PR against main, and update TRACKER.md.
+
+RULES:
+- Only modify files listed in the task spec
+- Only modify files in the chadbacktesting/ repo (never arkon/)
+- Follow acceptance criteria exactly
 ```
 
 ---
@@ -376,29 +409,61 @@ Do NOT write code. Only write specs.
 
 ### 2. Coder Agent
 
-**Role**: Implementation. Takes a task spec from Architect and writes the code. Has access to all files in both `arkon/` and `chadbacktesting/` repos.
+**Role**: Implementation. Takes a task spec from Architect and writes the code.
+
+There are two variants:
+
+| Variant | Runs Where | Can Access |
+|---------|-----------|------------|
+| **Cloud Coder** | Cursor Cloud VM | `chadbacktesting/` repo only (cloned from GitHub) |
+| **Local Coder** | Cursor desktop IDE | Both `arkon/` and `chadbacktesting/` + SSH to Hetzner server |
+
+The task spec's `**Execution**` field determines which variant runs the task.
 
 **When to Use**: After Architect has produced a task spec.
 
-**Input**: A specific `tasks/<phase>/<task-id>.md` spec + PLAN.md for broader context.
+**Input**: A specific `tasks/<phase>/<task-id>.md` spec + relevant excerpts from PLAN.md (included in the spec).
 
-**Output**: Code changes committed to the appropriate repo. Updates the task status in `status/<task-id>.md`.
+**Output**:
+- Cloud Coder: pushes branch, creates PR, writes `status/<task-id>.md`
+- Local Coder: commits directly, writes `status/<task-id>.md`
 
-**Prompt Template**:
+**Prompt Template (Cloud Coder)**:
 ```
-You are the Coder Agent for the Chad Backtesting project.
+You are a Cloud Coder Agent for the Chad Backtesting project.
 
 Read the task spec at tasks/[phase]/[task-id].md.
-Read PLAN.md for system architecture context.
 Read AGENTS.md section "Target User Persona" to understand who you're building for.
 
 Your job:
+1. Create branch: phase-[N]/[task-id]
+2. Implement exactly what the spec describes
+3. Only modify files listed in the spec (all within chadbacktesting/)
+4. Write clean code with no unnecessary comments
+5. Push your branch and create a PR against main
+6. Write a brief status update to status/[task-id].md
+
+CRITICAL RULES:
+- NEVER touch arkon/ files (you don't have access anyway)
+- All secrets go in .env, never in code
+- Follow acceptance criteria exactly
+```
+
+**Prompt Template (Local Coder)**:
+```
+You are a Local Coder Agent for the Chad Backtesting project.
+
+Read the task spec at tasks/[phase]/[task-id].md.
+Read PLAN.md for system architecture context.
+
+Your job:
 1. Implement exactly what the spec describes
-2. Do NOT modify files not listed in the spec unless absolutely necessary
-3. Do NOT touch the database on the Hetzner server or overwrite strategies.db
-4. All Arkon chart code stays in arkon/ — never copy to chadbacktesting/
-5. Write clean code with no unnecessary comments
-6. After implementation, write a brief status update to status/[task-id].md describing what you did
+2. For server changes: SSH into 95.216.5.147 as root
+3. For arkon/ changes: edit files directly
+4. Do NOT touch the database on the Hetzner server or overwrite strategies.db
+5. All Arkon chart code stays in arkon/ — never copy to chadbacktesting/
+6. Write clean code with no unnecessary comments
+7. Write a brief status update to status/[task-id].md
 
 CRITICAL RULES:
 - The private backtesting at /pvt must keep working at all times
@@ -796,67 +861,59 @@ QA agents additionally read:
 
 ### How to Execute a Phase
 
-#### The Short Version
+#### For Cloud-Heavy Phases (3, 5, 6, 7)
 
-1. Open one Composer. Paste the **Orchestrator Prompt** (see above).
-2. Say: "Begin Phase [N]"
-3. Orchestrator reads TRACKER.md, spins up Architect, then Coders, then QA, then reviewers.
-4. At checkpoints it asks you: "Deploy?" / "Proceed?" / "Fix X?"
-5. You answer. It continues.
+These phases mostly build SaaS pages/features in the `chadbacktesting/` repo.
 
-#### The Detailed Version
+1. **Kick off the Architect** (cloud agent or local Composer — either works):
+   - "Read TRACKER.md and PLAN.md. Produce task specs for Phase N. Write them to `tasks/phase-N/`."
+   - Architect writes self-contained specs, each with `**Execution**: CLOUD` or `**Execution**: LOCAL`
+   - Architect identifies parallel groups
 
-**Step 0 — Pre-flight** (Orchestrator does this automatically):
-- Reads TRACKER.md to confirm current phase and round
-- Checks if previous phase is marked complete
-- Checks for unresolved feedback from prior rounds
+2. **Kick off Cloud Coders** (one per task that can run in parallel):
+   - Go to `cursor.com/agents` (or Slack, or GitHub, or local Composer)
+   - Start a cloud agent for each CLOUD task with the Cloud Agent Prompt Template
+   - They each clone the repo, create their branch, implement the spec, push, and create a PR
+   - You can kick off many at once — they all run on separate VMs
 
-**Step 1 — Architect** (Orchestrator runs this):
-- Spins up Architect as a sub-agent (or does it inline if context allows)
-- Architect reads the phase's task list from PLAN.md
-- Writes self-contained task specs to `tasks/phase-N/`
-- Each spec includes only the context the Coder needs (excerpted, not the full plan)
-- Identifies parallel groups and marks them in TRACKER.md
-- Orchestrator verifies specs were written, updates TRACKER.md
+3. **Kick off any LOCAL tasks** in a local Composer:
+   - If the phase has any local tasks (SSH, arkon/ changes), handle them in a local Composer
 
-**Step 2 — Coding** (Orchestrator coordinates):
-- For small tasks: Orchestrator spawns Coder sub-agents via Task tool (max 3 in parallel)
-- For large tasks: Orchestrator tells Mason "Open a new Composer, paste this prompt: [...]"
-- Each Coder reads only its task spec file (self-contained, ~50 lines, not the whole plan)
-- Each Coder updates TRACKER.md when done (its row only)
-- Orchestrator monitors progress by re-reading TRACKER.md
-- When a parallel group finishes, Orchestrator starts the next group
+4. **Reviews** (all cloud agents):
+   - Kick off QA, Gap Analyst, Persona, and Security Reviewer as cloud agents
+   - They analyze the PRs and code, write reports to `reviews/` and `qa/`
 
-**Step 3 — QA** (Orchestrator spawns QA sub-agents):
-- For each completed task, QA tests against the acceptance criteria in the task spec
-- Writes pass/fail reports to `qa/`
-- Updates TRACKER.md
-- If QA fails a task → status goes to NEEDS_FIX, Orchestrator re-assigns to Coder
+5. **Merge PRs** when reviews pass
 
-**Step 4 — Reviews** (Orchestrator spawns 3 in parallel):
-- Gap Analyst, User Persona, Security Reviewer all run simultaneously
-- Each reads the code and QA reports, writes to `reviews/`
-- Orchestrator waits for all three to complete
+6. **Mason checkpoint**: Review feedback, approve/reject/fix
 
-**Step 5 — Feedback** (Orchestrator does this inline):
-- Reads all QA reports + all three reviews
-- Writes consolidated `feedback/phase-N-round-M.md`
-- If critical/major issues → sets tasks to NEEDS_FIX, loops back to Step 2
-- If clean → asks Mason: "Phase N complete. All reviews passed. Proceed to Phase N+1?"
+#### For Local-Heavy Phases (1, 2)
 
-**Step 6 — Mason checkpoint**:
-- Mason says "proceed" or "fix X" or "deploy"
-- Orchestrator updates TRACKER.md and continues
+These phases involve SSH to the server and `arkon/` file changes.
 
-### How the QA → Fix Loop Works
+1. **Open a local Composer** in Cursor desktop
+2. **Paste the Orchestrator Prompt** (local mode, see above)
+3. Say: "Begin Phase [N]"
+4. The orchestrator SSHes into the server, executes commands, edits files
+5. It handles the task sequence, running tasks in dependency order
+6. At deployment checkpoints, it stops and asks you to confirm
+7. When the phase is done, it updates TRACKER.md
+
+#### For Mixed Phases (4)
+
+Some tasks are cloud (HTML/CSS pages), some are local (server routes). Run them in parallel:
+- Local Composer: handles OAuth route implementation in `arkon/mbo_streaming_server.py`
+- Cloud agents: build auth pages, dashboard HTML, settings pages — all in `chadbacktesting/`
+- Integration happens at the end when cloud PRs are merged and local server changes are deployed
+
+### The QA → Fix Loop
 
 ```
-Coder finishes T1.3 → QA tests T1.3 → FAILS (WebSocket not proxied)
+Coder pushes branch → QA cloud agent reviews PR → FAILS (WebSocket not proxied)
     → QA writes qa/T1.3-qa.md with failure details
     → TRACKER.md: T1.3 = NEEDS_FIX
-    → Orchestrator reads the QA report
-    → Orchestrator spawns Coder sub-agent: "Read qa/T1.3-qa.md. Fix the issue."
-    → Coder fixes → QA retests → PASSES
+    → New coder agent picks up the fix: "Read qa/T1.3-qa.md. Fix the issue on branch phase-1/T1.3."
+    → Coder fixes, pushes updated branch → QA retests → PASSES
     → TRACKER.md: T1.3 = DONE
 ```
 
@@ -866,64 +923,95 @@ This inner loop runs automatically. Mason only gets involved at phase-level chec
 
 ## Parallel Execution Strategy
 
-### Which Agents Can Run in Parallel (max 3 at a time)
+### Cloud vs Local Parallelism
 
-| Agent | Parallel With | Notes |
-|-------|---------------|-------|
-| Architect | Nothing | Must complete before coders |
-| Coder A | Coder B, Coder C | Max 3 coders. No overlapping files. |
-| QA (Task A) | QA (Task B), QA (Task C) | Max 3. Independent tasks only. |
-| Gap Analyst | Persona Agent, Security Reviewer | Exactly 3 — fits the limit |
-| Feedback Aggregator | Nothing | Needs all reviews complete first |
+| Agent Type | Parallelism Limit | Why |
+|------------|-------------------|-----|
+| **Cloud agents** | Effectively unlimited (Cursor manages infra) | Each runs on its own VM, zero local resource cost |
+| **Local Composers** | Max 2-3 concurrent | Share your machine's RAM/CPU |
+| **Cloud + Local combined** | Cloud unlimited + Local 2-3 | They don't interfere with each other |
+
+This means for a phase like Phase 3 (landing page), you can kick off 5-6 cloud coders simultaneously — one per page/component — while a local Composer handles Phase 1 server config in parallel.
+
+### Which Agents Can Run in Parallel
+
+| Agent | Parallel With | Runs As | Notes |
+|-------|---------------|---------|-------|
+| Architect | Nothing | Cloud or Local | Must complete before coders start |
+| Cloud Coder A | Cloud Coder B, C, D... | Cloud | No overlapping files. Many can run. |
+| Local Coder | Other Local Coder (max 2) | Local | Only for arkon/ or SSH tasks |
+| QA (Task A) | QA (Task B, C, D...) | Cloud | Read-only analysis, many can run |
+| Gap Analyst | Persona Agent, Security Reviewer | Cloud | All three run simultaneously |
+| Feedback Aggregator | Nothing | Cloud or Local | Needs all reviews complete first |
 
 ### Phase-Level Parallelism
 
-Some phases can overlap:
-- **Phase 1 (nginx/SSL) and Phase 2 (private route)**: Phase 2 code changes can be written locally while Phase 1 sets up the server. Deploy Phase 2 after Phase 1 is verified.
-- **Phase 3 (landing page) and Phase 4 (auth)**: Landing page design/build can happen while auth backend is being implemented. Integrate the "Sign in with Google" button when both are ready.
-- **Phase 5 (Stripe) and Phase 6 (multi-tenant)**: Stripe integration and data isolation can be built in parallel since they touch different parts of the codebase.
+Because cloud and local agents don't share resources, phases can overlap aggressively:
 
-### Max Parallelism Per Step
+| Parallel Track A (Local) | Parallel Track B (Cloud) |
+|--------------------------|--------------------------|
+| Phase 1: SSH into server, install nginx, configure SSL | Phase 3: Build landing page (multiple cloud coders) |
+| Phase 2: Modify `arkon/mbo_streaming_server.py` for /pvt route | Phase 3 continued: Pricing page, features section, footer |
+| Phase 4 (local parts): Add OAuth routes to server | Phase 4 (cloud parts): Auth pages, dashboard HTML/CSS |
 
-**Hard limit: 3 concurrent agents maximum.** This limit exists for two reasons:
-1. **Machine resources** — each Cursor Composer / sub-agent consumes RAM and CPU. On most machines, 3 concurrent agents is the sweet spot. More than that and you risk slowdowns, context window thrashing, and your machine becoming unresponsive (especially if you're also running other apps).
-2. **Coordination complexity** — more parallel agents = more potential for file conflicts and harder to track.
+Cloud agents work on branches in the GitHub repo. Local agents work on the server and `arkon/` files. They never conflict.
 
-Resource considerations:
-- Each Cursor agent uses roughly 500MB-1GB of RAM for its context/model interaction
-- 3 agents + Cursor itself + your OS = ~6-8GB RAM usage. If you have 16GB, you're fine. 8GB will be tight.
-- CPU spikes during agent responses but is mostly idle while waiting for API round-trips
-- Network bandwidth is the actual bottleneck — all agents call the LLM API concurrently, but this is Cursor's infrastructure, not yours
-- If your machine starts lagging, drop to 2 concurrent agents
+### Resource Considerations (Local Only)
 
-Parallelism by step:
-- **Step 2 (Coding)**: Max 3 Coder agents simultaneously
-- **Step 3 (QA)**: Max 3 QA agents simultaneously (usually fewer needed)
-- **Step 4 (Reviews)**: 3 agents (Gap, Persona, Security) — fits exactly at the limit
-- **Total**: Never more than 3 agents running at once
+Cloud agents have zero impact on your machine. For local Composers:
+- Each Cursor Composer uses roughly 500MB-1GB RAM for context/model interaction
+- 2-3 local agents + Cursor itself + your OS = ~4-6GB RAM usage
+- If you have 16GB, 3 local agents is fine. 8GB, stick to 2.
+- If your machine starts lagging, drop local agents to 1 and let cloud agents carry the load
+
+### The Key Rule: File Ownership Prevents Conflicts
+
+Regardless of how many agents run, the Architect enforces:
+1. No two agents (cloud or local) modify the same file simultaneously
+2. Cloud agents only touch `chadbacktesting/` repo files
+3. Local agents own `arkon/` files and server configs
+4. Each cloud agent works on its own Git branch
 
 ---
 
-## Kicking Off the First Phase
+## Kicking Off the Project
 
-To begin Phase 1 (Server Infrastructure), spin up the Architect Agent with:
+### Quick Start (3 steps)
+
+**Step 1: Run the Architect (cloud agent or local Composer)**
+
+Open a new Composer (local or cloud) and paste:
 
 ```
-You are the Architect Agent. Read PLAN.md and AGENTS.md.
+Read chadbacktesting/PLAN.md and chadbacktesting/AGENTS.md.
 
-The current phase is Phase 1: Server Infrastructure (nginx, SSL, Domain, Security Hardening).
-Tasks T1.1 through T1.15.
+You are the Architect Agent. The current phase is Phase 1: Server Infrastructure
+(nginx, SSL, Domain, Security Hardening). Tasks T1.1 through T1.15.
 
 Break each task into an implementable spec. Write specs to tasks/phase-1/.
+For each spec, set **Execution** to CLOUD or LOCAL:
+- LOCAL: anything requiring SSH to 95.216.5.147 or modifying arkon/ files
+- CLOUD: anything that only modifies chadbacktesting/ repo files (configs, templates, docs)
+
 Identify which tasks can run in parallel and which have dependencies.
-Mark the parallel groups clearly.
+Update TRACKER.md with the parallel groups.
 
 Key context:
 - Server: 95.216.5.147, SSH as root with ~/.ssh/hetzner_server_key
 - Server dir: /opt/mbo_server
 - Current state: uvicorn running on 0.0.0.0:8000, no nginx, no SSL, no domain config
-- Target state: nginx reverse proxy, Let's Encrypt SSL, HTTPS-only, www→non-www redirect, WebSocket proxy
+- Target: nginx reverse proxy, Let's Encrypt SSL, HTTPS-only, www→non-www redirect, WebSocket proxy
 - CRITICAL: Do not break the existing backtesting tool at http://95.216.5.147:8000/
 ```
 
-After Architect completes, spin up Coder agents for the first parallel group, and the loop begins.
+**Step 2: Run LOCAL tasks in a local Composer**
+
+After the Architect writes the task specs, open a local Composer and paste the **Orchestrator Prompt (local mode)** from the section above. It will pick up all LOCAL tasks and execute them sequentially via SSH.
+
+**Step 3: Run CLOUD tasks as cloud agents**
+
+For any CLOUD tasks the Architect produced, kick them off at `cursor.com/agents` or from another Composer using the **Cloud Agent Prompt Template** from the section above.
+
+**In parallel**: While the local Composer handles Phase 1 server setup, you can already kick off a cloud Architect agent to produce Phase 3 (landing page) task specs — and start cloud coders on those. The two tracks don't share any files.
+
+After all tasks complete, kick off QA and review agents (cloud), aggregate feedback, and proceed to the next phase. The full flow is documented in the Phase Execution Playbooks above.

@@ -1,8 +1,14 @@
 # Chad Backtesting - Master Plan & System Context
 
 **Companion documents:**
-- **AGENTS.md** — Agent execution system, roles, flows, recursive build loop, user persona, prompt templates
+- **AGENTS.md** — Agent execution system (hybrid cloud/local model), roles, flows, recursive build loop, user persona, prompt templates
+- **TRACKER.md** — Live project state tracker (task status, phase progress, approvals)
 - **PLAN.md** (this file) — Product plan, architecture, database, API, security, task breakdown
+
+**Execution model:**
+- **Cloud agents** (Cursor Cloud VMs): Handle all `chadbacktesting/` repo work (SaaS pages, configs, reviews). Each works on its own branch. Many can run in parallel.
+- **Local Composers** (Cursor desktop): Handle `arkon/` modifications and SSH to the Hetzner server. Max 2-3 concurrent.
+- See AGENTS.md "How This Works in Cursor" for full details.
 
 ## Table of Contents
 1. [Project Vision](#project-vision)
@@ -1224,7 +1230,10 @@ cd c:\Users\mason\Documents\arkon
 
 ## Files That Agents Will Need to Modify
 
-### Infrastructure (nginx, SSL, Domain, Security)
+> **Execution rule**: LOCAL files require a Local Composer (Cursor desktop IDE with SSH access).
+> CLOUD files can be handled by Cloud Agents (Cursor Cloud VMs working in the chadbacktesting GitHub repo).
+
+### Infrastructure (nginx, SSL, Domain, Security) — ALL LOCAL
 1. Server: Install nginx, certbot via SSH
 2. Server: `/etc/nginx/sites-available/chadbacktesting.com` — production-hardened config (see Domain & DNS section)
 3. Server: `/etc/nginx/nginx.conf` — add rate limiting zone in `http {}` block
@@ -1234,16 +1243,28 @@ cd c:\Users\mason\Documents\arkon
 7. Server: Set up logrotate for server.log and nginx logs
 8. Server: Set up automated daily database backup cron job
 
-### Initiative 1 (Private Route)
+### Initiative 1 (Private Route) — ALL LOCAL
 1. `arkon/mbo_streaming_server.py` — Add `/pvt` route (~line 1334), add `.env` loading for `PVT_ACCESS_KEY`
 2. `arkon/update_frontend.sh` — Update URL references
 3. `arkon/update_frontend.bat` — Update URL references
 4. `arkon/deploy_mbo_server.bat` — Update URL references
 5. `arkon/deploy_mbo_server.sh` — Update URL references
 
-### Initiative 2 (SaaS Product)
-1. `chadbacktesting/` — SaaS-only code (landing page, dashboard, billing pages, deployment scripts, nginx configs, brand assets)
-2. `arkon/mbo_streaming_server.py` — Major additions:
+### Initiative 2 (SaaS Product) — MIXED
+**CLOUD** (chadbacktesting/ repo — cloud agents handle these):
+1. Landing page HTML/CSS/JS
+2. Dashboard page templates
+3. Billing/account page templates
+4. GigaChad brand assets (images, logo, fonts)
+5. nginx config templates (templates live in repo, deployed by local agent)
+6. SaaS deployment scripts
+7. Stripe frontend integration code
+8. Auth page templates (sign-in, callback, error pages)
+9. Admin panel page templates
+10. This planning document (PLAN.md, AGENTS.md, TRACKER.md)
+
+**LOCAL** (arkon/ + server — local Composers handle these):
+1. `arkon/mbo_streaming_server.py` — Major additions:
    - Google OAuth routes (`/auth/google`, `/auth/callback`, `/auth/logout`)
    - `users` table and user management
    - Auth middleware (session validation on protected routes)
@@ -1253,23 +1274,24 @@ cd c:\Users\mason\Documents\arkon
    - CORS lockdown from `*` to `chadbacktesting.com`
    - Landing page and SaaS page serving routes
    - Admin routes
-3. `arkon/arkon.html` — Remove/auto-populate "Who is using Arkon?" modal for SaaS users; owner auto-set from session
-4. Server: nginx config, SSL certs, rate limiting, security headers
+2. `arkon/arkon.html` — Remove/auto-populate "Who is using Arkon?" modal for SaaS users; owner auto-set from session
+3. Server: nginx config deployment, SSL certs, rate limiting, security headers
 
 ### What `chadbacktesting/` Repo Contains (and Does NOT Contain)
 
-**Contains:**
+**Contains** (all CLOUD-editable):
 - Landing page HTML/CSS/JS (or framework-based pages)
-- Auth integration code (Google Sign-In OAuth flow)
+- Auth page templates (Google Sign-In flow UI)
 - Dashboard page templates
 - Billing/account page templates
 - GigaChad brand assets (images, logo, fonts)
 - nginx config templates
 - SaaS deployment scripts
-- Stripe integration code (if separate from main server)
-- This planning document (PLAN.md)
+- Stripe frontend integration code
+- Planning docs (PLAN.md, AGENTS.md, TRACKER.md)
+- Task specs, status reports, QA reports, reviews (`tasks/`, `status/`, `qa/`, `reviews/`, `feedback/`)
 
-**Does NOT contain:**
+**Does NOT contain** (LOCAL-only, stays in `arkon/`):
 - `arkon.html` (stays in `arkon/`)
 - `mbo_streaming_server.py` (stays in `arkon/`)
 - NightVision charting library (stays in `arkon/static/nightvision-local/`)
